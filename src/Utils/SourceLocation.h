@@ -2,16 +2,19 @@
 #define SOURCE_LOCATION_H
 
 #include "Types.h"
-#include <string_view>
 
 namespace svm {
 struct SourceLocation {
-  std::string_view snapshot;
+  usize offset = 0;
   u32 line = 0;   // 1-based
   u32 column = 0; // 1-based
-  u32 length = 0;
+  usize length = 0;
 
-  bool isValid() const noexcept { return !snapshot.empty() && line > 0; }
+  SourceLocation(usize offset = 0, u32 line = 0, u32 column = 0,
+                 usize length = 0)
+      : offset(offset), line(line), column(column), length(length) {}
+
+  bool isValid() const noexcept { return line > 0; }
 };
 } // namespace svm
 

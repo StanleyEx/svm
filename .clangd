@@ -1,1 +1,2 @@
-CompileCommandsDir: build
+CompileFlags:
+  CompilationDatabase: build/

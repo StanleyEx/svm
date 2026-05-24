@@ -21,7 +21,8 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 add_compile_options(
     -Wall -Wextra -Wpedantic
     # -Werror
-    -Wno-unused-parameter
+    # -Wno-unused-parameter
+    -Wno-gnu-zero-variadic-macro-arguments
     -fno-rtti
     -fno-exceptions
 )

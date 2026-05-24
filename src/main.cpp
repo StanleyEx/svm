@@ -1,10 +1,16 @@
 
 
+#include "Lexer.h"
+#include "Token.h"
 #include "Utils/Arena.h"
+#include "Utils/DiagnosticEngine.h"
 #include "Utils/Types.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <string>
+#include <string_view>
 
 enum class Stage {
   TokenDump,
@@ -26,7 +32,7 @@ int main(int argc, char *argv[]) {
                stderr);
     return 1;
   };
-  for (i8 i = 1; i < argc; ++i) {
+  for (i32 i = 1; i < argc; ++i) {
     auto *arg = argv[i];
     if (std::strcmp(arg, "-emit-tokens") == 0) {
       stage = Stage::TokenDump;
@@ -74,8 +80,48 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // 前端
   Arena arena;
+  svm::DiagnosticEngine diagEngine(arena);
+  auto sourceView = std::string_view(source);
 
-  return 0;
+  // 前端
+  svm::Lexer lexer(arena, diagEngine, sourceView);
+  if (stage == Stage::TokenDump) {
+    while (true) {
+      auto t = lexer.nextToken();
+
+      switch (t.type) {
+      case svm::TokenType::Identifier:
+        std::fprintf(output, "%u:%u\t%s\t[%.*s]\n", t.location.line,
+                     t.location.column, t.toString(), (i32)t.text.length(),
+                     std::string(t.text.data()).c_str());
+      case svm::TokenType::IntegerLiteral:
+        std::fprintf(output, "%u:%u\t%s\t[%d]\n", t.location.line,
+                     t.location.column, t.toString(), t.intValue);
+        break;
+      case svm::TokenType::FloatLiteral:
+        std::fprintf(output, "%u:%u\t%s\t[%g]\n", t.location.line,
+                     t.location.column, t.toString(), (double)t.floatValue);
+        break;
+      case svm::TokenType::StringLiteral:
+        std::fprintf(output, "%u:%u\t%s\t[%s]\n", t.location.line,
+                     t.location.column, t.toString(), t.text.data());
+        break;
+      default:
+        std::fprintf(output, "%u:%u\t%s\n", t.location.line, t.location.column,
+                     t.toString());
+      }
+      if (t.type == svm::TokenType::EoF) {
+        break;
+      }
+    }
+    diagEngine.printAll();
+    goto cleanup;
+  }
+
+cleanup:
+  if (outputPath) {
+    std::fclose(output);
+  }
+  return diagEngine.getErrorCount() > 0 ? 1 : 0;
 }
