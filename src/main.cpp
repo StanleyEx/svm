@@ -5,7 +5,7 @@
 #include "Utils/Arena.h"
 #include "Utils/DiagnosticEngine.h"
 #include "Utils/Types.h"
-#include <algorithm>
+
 #include <cstdio>
 #include <cstring>
 #include <fstream>

@@ -24,8 +24,9 @@ public:
   explicit DiagnosticEngine(Arena &arena) : arena_(arena) {}
 
   void diagEmit(DiagnosticLevel level, SourceLocation location,
-                const char *file, const char *func, usize line, const char *fmt,
-                ...) {
+                [[maybe_unused]] const char *file,
+                [[maybe_unused]] const char *func, [[maybe_unused]] usize line,
+                const char *fmt, ...) {
     va_list args, argsCopy;
     va_start(args, fmt);
 
