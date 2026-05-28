@@ -143,6 +143,7 @@ public:
   }
 
   template <typename T> T *createArray(usize count) {
+    assert(count > 0);
     void *memory = allocate(sizeof(T) * count, alignof(T));
     T *array = static_cast<T *>(memory);
     usize constructed = 0;
