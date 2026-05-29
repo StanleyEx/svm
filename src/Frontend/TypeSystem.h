@@ -18,7 +18,7 @@ enum class TypeKind : u8 {
   Function
 };
 
-[[maybe_unused]] static const char *typeKindToString(TypeKind type) {
+[[maybe_unused]] static const char *getString(TypeKind type) {
   switch (type) {
   case TypeKind::Int:
     return "int";
@@ -35,7 +35,7 @@ enum class TypeKind : u8 {
   case TypeKind::Function:
     return "function";
   default:
-    return "<ErrorType>";
+    return "<InvalidType>";
   }
 }
 

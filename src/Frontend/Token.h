@@ -8,7 +8,7 @@
 
 namespace svm {
 
-enum class TokenType : u16 {
+enum class TokenKind : u16 {
   EoF,
   Error,
 
@@ -57,11 +57,11 @@ enum class TokenType : u16 {
 };
 
 struct Token {
-  TokenType type = TokenType::EoF;
+  TokenKind type = TokenKind::EoF;
   SourceLocation location;
   std::string_view text;
 
-  Token(TokenType type, SourceLocation location, std::string_view text)
+  Token(TokenKind type, SourceLocation location, std::string_view text)
       : type(type), location(location), text(text) {}
 
   union {
@@ -69,85 +69,85 @@ struct Token {
     f32 floatValue;
   };
 
-  const char *toString() const {
+  [[maybe_unused]] const char *toString() const {
     switch (type) {
-    case TokenType::EoF:
+    case TokenKind::EoF:
       return "<EOF>";
-    case TokenType::Error:
+    case TokenKind::Error:
       return "<Error>";
-    case TokenType::IntegerLiteral:
+    case TokenKind::IntegerLiteral:
       return "<IntegerLiteral>";
-    case TokenType::FloatLiteral:
+    case TokenKind::FloatLiteral:
       return "<FloatLiteral>";
-    case TokenType::StringLiteral:
+    case TokenKind::StringLiteral:
       return "<StringLiteral>";
-    case TokenType::Identifier:
+    case TokenKind::Identifier:
       return "<Identifier>";
-    case TokenType::KW_Const:
+    case TokenKind::KW_Const:
       return "const";
-    case TokenType::KW_Int:
+    case TokenKind::KW_Int:
       return "int";
-    case TokenType::KW_Float:
+    case TokenKind::KW_Float:
       return "float";
-    case TokenType::KW_Void:
+    case TokenKind::KW_Void:
       return "void";
-    case TokenType::KW_If:
+    case TokenKind::KW_If:
       return "if";
-    case TokenType::KW_Else:
+    case TokenKind::KW_Else:
       return "else";
-    case TokenType::KW_While:
+    case TokenKind::KW_While:
       return "while";
-    case TokenType::KW_Break:
+    case TokenKind::KW_Break:
       return "break";
-    case TokenType::KW_Continue:
+    case TokenKind::KW_Continue:
       return "continue";
-    case TokenType::KW_Return:
+    case TokenKind::KW_Return:
       return "return";
-    case TokenType::LParen:
+    case TokenKind::LParen:
       return "(";
-    case TokenType::RParen:
+    case TokenKind::RParen:
       return ")";
-    case TokenType::LBracket:
+    case TokenKind::LBracket:
       return "[";
-    case TokenType::RBracket:
+    case TokenKind::RBracket:
       return "]";
-    case TokenType::LBrace:
+    case TokenKind::LBrace:
       return "{";
-    case TokenType::RBrace:
+    case TokenKind::RBrace:
       return "}";
-    case TokenType::Comma:
+    case TokenKind::Comma:
       return ",";
-    case TokenType::Semicolon:
+    case TokenKind::Semicolon:
       return ";";
-    case TokenType::Assign:
+    case TokenKind::Assign:
       return "=";
-    case TokenType::Plus:
+    case TokenKind::Plus:
       return "+";
-    case TokenType::Minus:
+    case TokenKind::Minus:
       return "-";
-    case TokenType::Star:
+    case TokenKind::Star:
       return "*";
-    case TokenType::Slash:
+    case TokenKind::Slash:
       return "/";
-    case TokenType::Percent:
+    case TokenKind::Percent:
       return "%";
-    case TokenType::Eq:
+    case TokenKind::Eq:
       return "==";
-    case TokenType::NotEq:
+    case TokenKind::NotEq:
       return "!=";
-    case TokenType::Less:
+    case TokenKind::Less:
       return "<";
-    case TokenType::LessEq:
+    case TokenKind::LessEq:
       return "<=";
-    case TokenType::Greater:
+    case TokenKind::Greater:
       return ">";
-    case TokenType::GreaterEq:
+    case TokenKind::GreaterEq:
       return ">=";
-    case TokenType::AndAnd:
+    case TokenKind::AndAnd:
       return "&&";
-    case TokenType::OrOr:
+    case TokenKind::OrOr:
       return "||";
-    case TokenType::Not:
+    case TokenKind::Not:
       return "!";
     default:
       return "<InvalidToken>";

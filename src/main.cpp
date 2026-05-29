@@ -91,19 +91,19 @@ int main(int argc, char *argv[]) {
       auto t = lexer.nextToken();
 
       switch (t.type) {
-      case svm::TokenType::Identifier:
+      case svm::TokenKind::Identifier:
         std::fprintf(output, "%u:%u\t%s\t[%.*s]\n", t.location.line,
                      t.location.column, t.toString(), (i32)t.text.length(),
                      std::string(t.text.data()).c_str());
-      case svm::TokenType::IntegerLiteral:
+      case svm::TokenKind::IntegerLiteral:
         std::fprintf(output, "%u:%u\t%s\t[%d]\n", t.location.line,
                      t.location.column, t.toString(), t.intValue);
         break;
-      case svm::TokenType::FloatLiteral:
+      case svm::TokenKind::FloatLiteral:
         std::fprintf(output, "%u:%u\t%s\t[%g]\n", t.location.line,
                      t.location.column, t.toString(), (double)t.floatValue);
         break;
-      case svm::TokenType::StringLiteral:
+      case svm::TokenKind::StringLiteral:
         std::fprintf(output, "%u:%u\t%s\t[%s]\n", t.location.line,
                      t.location.column, t.toString(), t.text.data());
         break;
@@ -111,7 +111,7 @@ int main(int argc, char *argv[]) {
         std::fprintf(output, "%u:%u\t%s\n", t.location.line, t.location.column,
                      t.toString());
       }
-      if (t.type == svm::TokenType::EoF) {
+      if (t.type == svm::TokenKind::EoF) {
         break;
       }
     }
