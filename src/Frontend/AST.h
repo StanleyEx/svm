@@ -8,85 +8,6 @@
 #include <string_view>
 
 namespace svm {
-enum class BasicType : u8 {
-  Int,
-  Float,
-};
-
-enum class ReturnType : u8 {
-  Void,
-  Int,
-  Float,
-};
-
-enum class BinaryOp : u8 {
-  Add,
-  Sub,
-  Mul,
-  Div,
-  Mod,
-  Eq,
-  NotEq,
-  Less,
-  LessEq,
-  Greater,
-  GreaterEq,
-  LogicAnd,
-  LogicOr,
-};
-
-[[maybe_unused]] static const char *getString(BinaryOp op) {
-  switch (op) {
-  case BinaryOp::Add:
-    return "+";
-  case BinaryOp::Sub:
-    return "-";
-  case BinaryOp::Mul:
-    return "*";
-  case BinaryOp::Div:
-    return "/";
-  case BinaryOp::Mod:
-    return "%";
-  case BinaryOp::Eq:
-    return "==";
-  case BinaryOp::NotEq:
-    return "!=";
-  case BinaryOp::Less:
-    return "<";
-  case BinaryOp::LessEq:
-    return "<=";
-  case BinaryOp::Greater:
-    return ">";
-  case BinaryOp::GreaterEq:
-    return ">=";
-  case BinaryOp::LogicAnd:
-    return "&&";
-  case BinaryOp::LogicOr:
-    return "||";
-  default:
-    return "<InvalidBinaryOp>";
-  }
-}
-
-enum class UnaryOp : u8 {
-  Plus,
-  Minus,
-  LogicNot,
-};
-
-[[maybe_unused]] static const char *getString(UnaryOp op) {
-  switch (op) {
-  case UnaryOp::Plus:
-    return "+";
-  case UnaryOp::Minus:
-    return "-";
-  case UnaryOp::LogicNot:
-    return "!";
-  default:
-    return "<InvalidUnaryOp>";
-  }
-}
-
 enum class ASTKind : u16 {
   CompUnit,
 
@@ -328,6 +249,11 @@ public:
 
 class UnaryExpr final : public ExprNode {
 public:
+  enum class UnaryOp : u8 {
+    Plus,
+    Minus,
+    LogicNot,
+  };
   UnaryOp op;
   ExprNode *operand;
 
@@ -337,10 +263,38 @@ public:
   static bool classof(const ASTNode *node) noexcept {
     return node->getKind() == ASTKind::UnaryExpr;
   }
+
+  [[maybe_unused]] const char *getString(UnaryOp op) {
+    switch (op) {
+    case UnaryOp::Plus:
+      return "+";
+    case UnaryOp::Minus:
+      return "-";
+    case UnaryOp::LogicNot:
+      return "!";
+    default:
+      return "<InvalidUnaryOp>";
+    }
+  }
 };
 
 class BinaryExpr final : public ExprNode {
 public:
+  enum class BinaryOp : u8 {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    NotEq,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+    LogicAnd,
+    LogicOr,
+  };
   BinaryOp op;
   ExprNode *lhs;
   ExprNode *rhs;
@@ -351,6 +305,39 @@ public:
 
   static bool classof(const ASTNode *node) noexcept {
     return node->getKind() == ASTKind::BinaryExpr;
+  }
+
+  [[maybe_unused]] const char *toString() {
+    switch (op) {
+    case BinaryOp::Add:
+      return "+";
+    case BinaryOp::Sub:
+      return "-";
+    case BinaryOp::Mul:
+      return "*";
+    case BinaryOp::Div:
+      return "/";
+    case BinaryOp::Mod:
+      return "%";
+    case BinaryOp::Eq:
+      return "==";
+    case BinaryOp::NotEq:
+      return "!=";
+    case BinaryOp::Less:
+      return "<";
+    case BinaryOp::LessEq:
+      return "<=";
+    case BinaryOp::Greater:
+      return ">";
+    case BinaryOp::GreaterEq:
+      return ">=";
+    case BinaryOp::LogicAnd:
+      return "&&";
+    case BinaryOp::LogicOr:
+      return "||";
+    default:
+      return "<InvalidBinaryOp>";
+    }
   }
 };
 
@@ -369,6 +356,17 @@ public:
         operand(operand) {}
   static bool classof(const ASTNode *node) noexcept {
     return node->getKind() == ASTKind::ImplicitCastExpr;
+  }
+
+  [[maybe_unused]] const char *toString() const {
+    switch (kind) {
+    case CastKind::IntToFloat:
+      return "int->float";
+    case CastKind::FloatToInt:
+      return "float->int";
+    default:
+      return "<InvalidCastKind>";
+    }
   }
 };
 
@@ -409,7 +407,7 @@ struct InitSegment {
 class VarDecl final : public DeclNode {
 public:
   const char *name;
-  BasicType basicType;   // Parse时填充
+  TypeKind basicType;    // Parse时填充
   ExprNode **dimensions; // 如果是标量则为nullptr
   u32 dimensionCount;    // 如果是标量则为0
   InitNode *init;        // 如果没有初始化则为nullptr
@@ -420,7 +418,7 @@ public:
   u32 initSegmentCount = 0;
   bool isGlobal = false;
 
-  VarDecl(SourceLocation location, const char *name, BasicType basicType,
+  VarDecl(SourceLocation location, const char *name, TypeKind basicType,
           ExprNode **dimensions, u32 dimensionCount, InitExpr *init) noexcept
       : DeclNode(ASTKind::VarDecl, location), name(name), basicType(basicType),
         dimensions(dimensions), dimensionCount(dimensionCount), init(init) {}
@@ -435,7 +433,7 @@ public:
 class ConstDecl final : public DeclNode {
 public:
   const char *name;
-  BasicType basicType;   // Parse时填充
+  TypeKind basicType;    // Parse时填充
   ExprNode **dimensions; // 如果是标量则为nullptr
   u32 dimensionCount;    // 如果是标量则为0
   InitNode *init;        // 规定必须有初始化
@@ -446,7 +444,7 @@ public:
   u32 initSegmentCount = 0;
   bool isGlobal = false;
 
-  ConstDecl(SourceLocation location, const char *name, BasicType basicType,
+  ConstDecl(SourceLocation location, const char *name, TypeKind basicType,
             ExprNode **dimensions, u32 dimensionCount, InitExpr *init) noexcept
       : DeclNode(ASTKind::ConstDecl, location), name(name),
         basicType(basicType), dimensions(dimensions),
@@ -464,14 +462,14 @@ public:
 class FuncParam final : public ASTNode {
 public:
   const char *name;
-  BasicType basicType;
+  TypeKind basicType;
   bool isArray;
   ExprNode **dimensions;
   u32 dimensionCount;
 
   Type *type = nullptr; // 完整类型 由Sema填充
 
-  FuncParam(SourceLocation location, const char *name, BasicType basicType,
+  FuncParam(SourceLocation location, const char *name, TypeKind basicType,
             bool isArray, ExprNode **dimensions, u32 dimensionCount) noexcept
       : ASTNode(ASTKind::FuncParam, location), name(name), basicType(basicType),
         isArray(isArray), dimensions(dimensions),
@@ -485,7 +483,7 @@ public:
 class FuncDecl final : public DeclNode {
 public:
   const char *name;
-  ReturnType returnType;
+  TypeKind returnType;
   FuncParam **params;
   u32 paramCount;
   StmtNode *body;
@@ -494,7 +492,7 @@ public:
   FunctionType *type = nullptr;
   bool isRuntime = false; // SysY运行时库函数
 
-  FuncDecl(SourceLocation location, const char *name, ReturnType returnType,
+  FuncDecl(SourceLocation location, const char *name, TypeKind returnType,
            FuncParam **params, u32 paramCount, StmtNode *body) noexcept
       : DeclNode(ASTKind::FuncDecl, location), name(name),
         returnType(returnType), params(params), paramCount(paramCount),
