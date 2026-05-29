@@ -1,9 +1,9 @@
 #ifndef AST_H
 #define AST_H
 
-#include "TypeSystem.h"
-#include "Utils/SourceLocation.h"
-#include "Utils/Types.h"
+#include "SourceLocation.h"
+#include "Type.h"
+#include "Utils.h"
 
 #include <string_view>
 

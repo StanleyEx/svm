@@ -1,7 +1,8 @@
 #ifndef ARENA_H
 #define ARENA_H
 
-#include "Types.h"
+#include "Utils.h"
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -99,6 +100,7 @@ public:
     // 尝试复用当前块后可能存在的下一个块
     if (current_->next) {
       Chunk *nextChunk = current_->next;
+      nextChunk->offset = 0;
       base = reinterpret_cast<std::uintptr_t>(nextChunk->data());
       alignedAddress = alignForward(base, alignment);
       padding = alignedAddress - base;
@@ -174,6 +176,17 @@ public:
     return array;
   }
 
+  template <typename T>
+  T **storeVectorToArena(const std::vector<T *> &vector,
+                         u64 &sizeOut) noexcept {
+    sizeOut = vector.size();
+    if (vector.empty())
+      return nullptr;
+    T **buffer = allocate(sizeof(T *) * vector.size(), alignof(T *));
+    std::memcpy(buffer, vector.data(), sizeof(T *) * vector.size());
+    return buffer;
+  }
+
   char *duplicateString(const char *str) noexcept {
     if (!str) {
       return nullptr;
@@ -212,6 +225,9 @@ public:
     current_ = mark.chunk;
     current_->offset = mark.offset;
     totalAllocated_ = mark.totalAllocatedAtMark;
+
+    for (Chunk *chunk = current_->next; chunk; chunk = chunk->next)
+      chunk->offset = 0;
   }
 
   // RAII作用域管理器，离开作用域时自动回滚到标记位置

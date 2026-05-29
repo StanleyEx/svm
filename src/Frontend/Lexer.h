@@ -1,10 +1,10 @@
 #ifndef LEXER_H
 #define LEXER_H
 
+#include "Arena.h"
+#include "DiagnosticEngine.h"
 #include "Token.h"
-#include "Utils/Arena.h"
-#include "Utils/DiagnosticEngine.h"
-#include "Utils/Types.h"
+#include "Utils.h"
 
 #include <string_view>
 namespace svm {
@@ -15,7 +15,7 @@ public:
       : arena_(arena), diagEngine_(diagEngine), source_(source),
         sourceLength_(source.size()) {}
 
-  Token nextToken();
+  Token next();
 
 private:
   Arena &arena_;

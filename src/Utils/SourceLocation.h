@@ -1,7 +1,7 @@
 #ifndef SOURCE_LOCATION_H
 #define SOURCE_LOCATION_H
 
-#include "Types.h"
+#include "Utils.h"
 
 namespace svm {
 struct SourceLocation {

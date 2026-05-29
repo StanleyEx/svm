@@ -1,10 +1,10 @@
 
 
+#include "Arena.h"
+#include "DiagnosticEngine.h"
 #include "Lexer.h"
 #include "Token.h"
-#include "Utils/Arena.h"
-#include "Utils/DiagnosticEngine.h"
-#include "Utils/Types.h"
+#include "Utils.h"
 
 #include <cstdio>
 #include <cstring>
@@ -88,7 +88,7 @@ int main(int argc, char *argv[]) {
   svm::Lexer lexer(arena, diagEngine, sourceView);
   if (stage == Stage::TokenDump) {
     while (true) {
-      auto t = lexer.nextToken();
+      auto t = lexer.next();
 
       switch (t.type) {
       case svm::TokenKind::Identifier:

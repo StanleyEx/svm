@@ -24,4 +24,6 @@ using isize = std::ptrdiff_t;
 using uintptr = std::uintptr_t;
 using intptr = std::intptr_t;
 
+#define UNUSED(x) (void)(x)
+
 #endif // TYPES_H

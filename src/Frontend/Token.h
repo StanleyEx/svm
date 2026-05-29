@@ -1,8 +1,8 @@
 #ifndef TOKEN_H
 #define TOKEN_H
 
-#include "Utils/SourceLocation.h"
-#include "Utils/Types.h"
+#include "SourceLocation.h"
+#include "Utils.h"
 
 #include <string_view>
 
@@ -57,12 +57,13 @@ enum class TokenKind : u16 {
 };
 
 struct Token {
+  Token() = default;
+  Token(TokenKind kind, SourceLocation location, std::string_view text)
+      : type(kind), location(location), text(text), intValue(0) {}
+
   TokenKind type = TokenKind::EoF;
   SourceLocation location;
   std::string_view text;
-
-  Token(TokenKind type, SourceLocation location, std::string_view text)
-      : type(type), location(location), text(text) {}
 
   union {
     i32 intValue = 0;

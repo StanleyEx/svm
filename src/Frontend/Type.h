@@ -1,8 +1,8 @@
 #ifndef TYPESYSTEM_H
 #define TYPESYSTEM_H
 
-#include "Utils/Arena.h"
-#include "Utils/Types.h"
+#include "Arena.h"
+#include "Utils.h"
 
 #include <unordered_map>
 

@@ -1,7 +1,4 @@
 #include "Lexer.h"
-#include "DiagnosticEngine.h"
-#include "Token.h"
-#include "Types.h"
 
 #include <cstdlib>
 #include <string>
@@ -46,7 +43,7 @@ static auto matchKeyword = [](std::string_view text) -> TokenKind {
   return TokenKind::Identifier;
 };
 
-Token Lexer::nextToken() {
+Token Lexer::next() {
   // 跳过空白字符和注释
   while (!isAtEnd()) {
     char ch = peek();
@@ -65,8 +62,8 @@ Token Lexer::nextToken() {
       if (isAtEnd()) {
         SVM_ERROR(diagEngine_, SourceLocation(offset_, line_, column_, 0),
                   "Unterminated block comment.");
-        return Token(TokenKind::Error,
-                     SourceLocation(offset_, line_, column_, 0), {});
+        return Token(
+            {TokenKind::Error, SourceLocation(offset_, line_, column_, 0), {}});
       } else {
         advance();
         advance();
@@ -84,7 +81,7 @@ Token Lexer::nextToken() {
   SourceLocation(startOffset, startLine, startColumn, offset_ - startOffset)
 
   if (isAtEnd()) {
-    return Token(TokenKind::EoF, SRC_LOC, {});
+    return Token({TokenKind::EoF, SRC_LOC, {}});
   }
   char ch = peek();
 
@@ -96,14 +93,13 @@ Token Lexer::nextToken() {
 
     std::string_view text = source_.substr(startOffset, offset_ - startOffset);
 
-    Token token(matchKeyword(text), SRC_LOC, text);
-    return token;
+    return Token({matchKeyword(text), SRC_LOC, text});
   }
 
   auto MK_ERROR = [this, startOffset, startLine,
                    startColumn](const char *MSG) -> Token {
     SVM_ERROR(diagEngine_, SRC_LOC, MSG);
-    return Token(TokenKind::Error, SRC_LOC, {});
+    return Token({TokenKind::Error, SRC_LOC, {}});
   };
 
   // 数字字面量
@@ -190,8 +186,8 @@ Token Lexer::nextToken() {
     }
 
     auto text = source_.substr(startOffset, offset_ - startOffset);
-    Token token(isFloat ? TokenKind::FloatLiteral : TokenKind::IntegerLiteral,
-                SRC_LOC, text);
+    Token token({isFloat ? TokenKind::FloatLiteral : TokenKind::IntegerLiteral,
+                 SRC_LOC, text});
 
     std::string digit(text);
     char *end = nullptr;
@@ -282,74 +278,74 @@ Token Lexer::nextToken() {
     if (!terminated) {
       return MK_ERROR("Unterminated string literal.");
     }
-    return Token(
-        TokenKind::StringLiteral, SRC_LOC,
-        std::string_view(arena_.duplicateString(buffer.data(), buffer.length()),
-                         buffer.length()));
+    return Token({TokenKind::StringLiteral, SRC_LOC,
+                  std::string_view(
+                      arena_.duplicateString(buffer.data(), buffer.length()),
+                      buffer.length())});
   }
 
   // 运算符和标点符号
   advance();
   switch (ch) {
   case '(':
-    return Token(TokenKind::LParen, SRC_LOC, "(");
+    return Token({TokenKind::LParen, SRC_LOC, "("});
   case ')':
-    return Token(TokenKind::RParen, SRC_LOC, ")");
+    return Token({TokenKind::RParen, SRC_LOC, ")"});
   case '[':
-    return Token(TokenKind::LBracket, SRC_LOC, "[");
+    return Token({TokenKind::LBracket, SRC_LOC, "["});
   case ']':
-    return Token(TokenKind::RBracket, SRC_LOC, "]");
+    return Token({TokenKind::RBracket, SRC_LOC, "]"});
   case '{':
-    return Token(TokenKind::LBrace, SRC_LOC, "{");
+    return Token({TokenKind::LBrace, SRC_LOC, "{"});
   case '}':
-    return Token(TokenKind::RBrace, SRC_LOC, "}");
+    return Token({TokenKind::RBrace, SRC_LOC, "}"});
   case ';':
-    return Token(TokenKind::Semicolon, SRC_LOC, ";");
+    return Token({TokenKind::Semicolon, SRC_LOC, ";"});
   case ',':
-    return Token(TokenKind::Comma, SRC_LOC, ",");
+    return Token({TokenKind::Comma, SRC_LOC, ","});
   case '+':
-    return Token(TokenKind::Plus, SRC_LOC, "+");
+    return Token({TokenKind::Plus, SRC_LOC, "+"});
   case '-':
-    return Token(TokenKind::Minus, SRC_LOC, "-");
+    return Token({TokenKind::Minus, SRC_LOC, "-"});
   case '*':
-    return Token(TokenKind::Star, SRC_LOC, "*");
+    return Token({TokenKind::Star, SRC_LOC, "*"});
   case '/':
-    return Token(TokenKind::Slash, SRC_LOC, "/");
+    return Token({TokenKind::Slash, SRC_LOC, "/"});
   case '%':
-    return Token(TokenKind::Percent, SRC_LOC, "%");
+    return Token({TokenKind::Percent, SRC_LOC, "%"});
   case '=':
     if (match('=')) {
-      return Token(TokenKind::Eq, SRC_LOC, "==");
+      return Token({TokenKind::Eq, SRC_LOC, "=="});
     } else {
-      return Token(TokenKind::Assign, SRC_LOC, "=");
+      return Token({TokenKind::Assign, SRC_LOC, "="});
     }
   case '!':
     if (match('=')) {
-      return Token(TokenKind::NotEq, SRC_LOC, "!=");
+      return Token({TokenKind::NotEq, SRC_LOC, "!="});
     } else {
-      return Token(TokenKind::Not, SRC_LOC, "!");
+      return Token({TokenKind::Not, SRC_LOC, "!"});
     }
   case '<':
     if (match('=')) {
-      return Token(TokenKind::LessEq, SRC_LOC, "<=");
+      return Token({TokenKind::LessEq, SRC_LOC, "<="});
     } else {
-      return Token(TokenKind::Less, SRC_LOC, "<");
+      return Token({TokenKind::Less, SRC_LOC, "<"});
     }
   case '>':
     if (match('=')) {
-      return Token(TokenKind::GreaterEq, SRC_LOC, ">=");
+      return Token({TokenKind::GreaterEq, SRC_LOC, ">="});
     } else {
-      return Token(TokenKind::Greater, SRC_LOC, ">");
+      return Token({TokenKind::Greater, SRC_LOC, ">"});
     }
   case '&':
     if (match('&')) {
-      return Token(TokenKind::AndAnd, SRC_LOC, "&&");
+      return Token({TokenKind::AndAnd, SRC_LOC, "&&"});
     } else {
       return MK_ERROR("Expected &&, bitwise & not supported.");
     }
   case '|':
     if (match('|')) {
-      return Token(TokenKind::OrOr, SRC_LOC, "||");
+      return Token({TokenKind::OrOr, SRC_LOC, "||"});
     } else {
       return MK_ERROR("Expected ||, bitwise | not supported.");
     }
