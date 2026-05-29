@@ -11,16 +11,19 @@ namespace svm {
 
 class Lexer {
 public:
-  Lexer(Arena &arena, DiagnosticEngine &diagEngine, std::string_view source)
-      : arena_(arena), diagEngine_(diagEngine), source_(source),
-        sourceLength_(source.size()) {}
+  Lexer(Arena &arena, DiagnosticEngine &diagEngine, const char *filename,
+        std::string_view source)
+      : arena_(arena), diagEngine_(diagEngine), filename_(filename),
+        source_(source), sourceLength_(source.size()) {}
 
   Token next();
+  const char *filename() const noexcept { return filename_; }
 
 private:
   Arena &arena_;
   DiagnosticEngine &diagEngine_;
 
+  const char *filename_;
   std::string_view source_;
   usize sourceLength_ = 0;
 

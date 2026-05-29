@@ -59,9 +59,9 @@ enum class TokenKind : u16 {
 struct Token {
   Token() = default;
   Token(TokenKind kind, SourceLocation location, std::string_view text)
-      : type(kind), location(location), text(text), intValue(0) {}
+      : kind(kind), location(location), text(text), intValue(0) {}
 
-  TokenKind type = TokenKind::EoF;
+  TokenKind kind = TokenKind::EoF;
   SourceLocation location;
   std::string_view text;
 
@@ -71,7 +71,7 @@ struct Token {
   };
 
   [[maybe_unused]] const char *toString() const {
-    switch (type) {
+    switch (kind) {
     case TokenKind::EoF:
       return "<EOF>";
     case TokenKind::Error:

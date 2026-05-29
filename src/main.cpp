@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 
+namespace svm {
 enum class Stage {
   TokenDump,
   AstDump,
@@ -80,17 +81,17 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  Arena arena;
-  svm::DiagnosticEngine diagEngine(arena);
   auto sourceView = std::string_view(source);
+  Arena arena;
+  svm::DiagnosticEngine diagEngine(arena, sourceView);
 
   // 前端
-  svm::Lexer lexer(arena, diagEngine, sourceView);
+  svm::Lexer lexer(arena, diagEngine, inputPath, sourceView);
   if (stage == Stage::TokenDump) {
     while (true) {
       auto t = lexer.next();
 
-      switch (t.type) {
+      switch (t.kind) {
       case svm::TokenKind::Identifier:
         std::fprintf(output, "%u:%u\t%s\t[%.*s]\n", t.location.line,
                      t.location.column, t.toString(), (i32)t.text.length(),
@@ -111,7 +112,7 @@ int main(int argc, char *argv[]) {
         std::fprintf(output, "%u:%u\t%s\n", t.location.line, t.location.column,
                      t.toString());
       }
-      if (t.type == svm::TokenKind::EoF) {
+      if (t.kind == svm::TokenKind::EoF) {
         break;
       }
     }
@@ -125,3 +126,5 @@ cleanup:
   }
   return diagEngine.getErrorCount() > 0 ? 1 : 0;
 }
+
+} // namespace svm

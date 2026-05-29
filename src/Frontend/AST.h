@@ -419,7 +419,7 @@ public:
   bool isGlobal = false;
 
   VarDecl(SourceLocation location, const char *name, TypeKind basicType,
-          ExprNode **dimensions, u32 dimensionCount, InitExpr *init) noexcept
+          ExprNode **dimensions, u32 dimensionCount, InitNode *init) noexcept
       : DeclNode(ASTKind::VarDecl, location), name(name), basicType(basicType),
         dimensions(dimensions), dimensionCount(dimensionCount), init(init) {}
 
@@ -445,7 +445,7 @@ public:
   bool isGlobal = false;
 
   ConstDecl(SourceLocation location, const char *name, TypeKind basicType,
-            ExprNode **dimensions, u32 dimensionCount, InitExpr *init) noexcept
+            ExprNode **dimensions, u32 dimensionCount, InitNode *init) noexcept
       : DeclNode(ASTKind::ConstDecl, location), name(name),
         basicType(basicType), dimensions(dimensions),
         dimensionCount(dimensionCount), init(init) {}

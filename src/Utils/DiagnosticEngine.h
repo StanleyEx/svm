@@ -5,10 +5,10 @@
 #include "SourceLocation.h"
 #include "Utils.h"
 
-#include <cassert>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <vector>
 
 namespace svm {
@@ -21,7 +21,8 @@ struct Diagnostic {
 
 class DiagnosticEngine {
 public:
-  explicit DiagnosticEngine(Arena &arena) : arena_(arena) {}
+  explicit DiagnosticEngine(Arena &arena, std::string_view source)
+      : arena_(arena), source_(source) {}
 
   void diagEmit(DiagnosticLevel level, SourceLocation location,
                 [[maybe_unused]] const char *file,
@@ -105,14 +106,21 @@ public:
     }
   }
 
+  std::string_view getSource() const { return source_; }
+
+  std::string_view getSource(SourceLocation loc) const {
+    return source_.substr(loc.offset, loc.length);
+  }
+
 private:
   Arena &arena_;
+  std::string_view source_;
   std::vector<Diagnostic> diagnostics_;
   usize warningCount_ = 0;
   usize errorCount_ = 0;
 };
 
-} // namespace svm
+#define SVM_SV(sv) static_cast<int>((sv).size()), (sv).data()
 
 #define SVM_NOTE(ENGINE, SRCLOC, FMT, ...)                                     \
   do {                                                                         \
@@ -145,5 +153,7 @@ private:
                         __func__, __LINE__, (FMT), ##__VA_ARGS__);             \
     }                                                                          \
   } while (0)
+
+} // namespace svm
 
 #endif // DIAGNOSTIC_ENGINE_H

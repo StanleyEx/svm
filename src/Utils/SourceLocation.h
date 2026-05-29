@@ -3,6 +3,8 @@
 
 #include "Utils.h"
 
+#include <cassert>
+
 namespace svm {
 struct SourceLocation {
   usize offset = 0;
@@ -15,6 +17,19 @@ struct SourceLocation {
       : offset(offset), line(line), column(column), length(length) {}
 
   bool isValid() const noexcept { return line > 0; }
+
+  SourceLocation operator+(const SourceLocation &rhs) const noexcept {
+    assert(isValid() && rhs.isValid());
+    SourceLocation result;
+    if (offset > rhs.offset) {
+      result = *this;
+      result.length = offset - rhs.offset + rhs.length;
+    } else {
+      result = rhs;
+      result.length = rhs.offset - offset + length;
+    }
+    return result;
+  }
 };
 } // namespace svm
 
