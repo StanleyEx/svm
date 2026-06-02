@@ -111,6 +111,7 @@ class ASTNode {
 public:
   ASTKind getKind() const noexcept { return type_; }
   SourceLocation getLocation() const noexcept { return location_; }
+  void setLocation(SourceLocation location) noexcept { location_ = location; }
 
 protected:
   ASTNode(ASTKind type, SourceLocation location)
@@ -264,7 +265,7 @@ public:
     return node->getKind() == ASTKind::UnaryExpr;
   }
 
-  [[maybe_unused]] const char *getString(UnaryOp op) {
+  [[maybe_unused]] const char *toString() const {
     switch (op) {
     case UnaryOp::Plus:
       return "+";
@@ -307,7 +308,7 @@ public:
     return node->getKind() == ASTKind::BinaryExpr;
   }
 
-  [[maybe_unused]] const char *toString() {
+  [[maybe_unused]] const char *toString() const {
     switch (op) {
     case BinaryOp::Add:
       return "+";
@@ -399,15 +400,15 @@ public:
 
 // Sema分析InitList时将其转换这个结构体
 struct InitSegment {
-  u32 initCount;
-  InitExpr *initExprs; // 如果为nullptr则说明全部为0初始化
+  u64 initCount;
+  ExprNode **initExprs; // 如果为nullptr则说明全部为0初始化
 };
 
 // -Decl
 class VarDecl final : public DeclNode {
 public:
   const char *name;
-  TypeKind basicType;    // Parse时填充
+  TypeKind baseType;     // Parse时填充
   ExprNode **dimensions; // 如果是标量则为nullptr
   u32 dimensionCount;    // 如果是标量则为0
   InitNode *init;        // 如果没有初始化则为nullptr
@@ -417,10 +418,11 @@ public:
   InitSegment *initSegments = nullptr;
   u32 initSegmentCount = 0;
   bool isGlobal = false;
+  bool isMutated = false;
 
-  VarDecl(SourceLocation location, const char *name, TypeKind basicType,
+  VarDecl(SourceLocation location, const char *name, TypeKind baseType,
           ExprNode **dimensions, u32 dimensionCount, InitNode *init) noexcept
-      : DeclNode(ASTKind::VarDecl, location), name(name), basicType(basicType),
+      : DeclNode(ASTKind::VarDecl, location), name(name), baseType(baseType),
         dimensions(dimensions), dimensionCount(dimensionCount), init(init) {}
 
   bool isArray() const noexcept { return dimensionCount > 0; }
@@ -433,7 +435,7 @@ public:
 class ConstDecl final : public DeclNode {
 public:
   const char *name;
-  TypeKind basicType;    // Parse时填充
+  TypeKind baseType;     // Parse时填充
   ExprNode **dimensions; // 如果是标量则为nullptr
   u32 dimensionCount;    // 如果是标量则为0
   InitNode *init;        // 规定必须有初始化
@@ -444,11 +446,10 @@ public:
   u32 initSegmentCount = 0;
   bool isGlobal = false;
 
-  ConstDecl(SourceLocation location, const char *name, TypeKind basicType,
+  ConstDecl(SourceLocation location, const char *name, TypeKind baseType,
             ExprNode **dimensions, u32 dimensionCount, InitNode *init) noexcept
-      : DeclNode(ASTKind::ConstDecl, location), name(name),
-        basicType(basicType), dimensions(dimensions),
-        dimensionCount(dimensionCount), init(init) {}
+      : DeclNode(ASTKind::ConstDecl, location), name(name), baseType(baseType),
+        dimensions(dimensions), dimensionCount(dimensionCount), init(init) {}
 
   bool isArray() const noexcept { return dimensionCount > 0; }
 
@@ -462,16 +463,16 @@ public:
 class FuncParam final : public ASTNode {
 public:
   const char *name;
-  TypeKind basicType;
+  TypeKind baseType;
   bool isArray;
   ExprNode **dimensions;
   u32 dimensionCount;
 
   Type *type = nullptr; // 完整类型 由Sema填充
 
-  FuncParam(SourceLocation location, const char *name, TypeKind basicType,
+  FuncParam(SourceLocation location, const char *name, TypeKind baseType,
             bool isArray, ExprNode **dimensions, u32 dimensionCount) noexcept
-      : ASTNode(ASTKind::FuncParam, location), name(name), basicType(basicType),
+      : ASTNode(ASTKind::FuncParam, location), name(name), baseType(baseType),
         isArray(isArray), dimensions(dimensions),
         dimensionCount(dimensionCount) {}
 

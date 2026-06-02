@@ -20,15 +20,10 @@ struct SourceLocation {
 
   SourceLocation operator+(const SourceLocation &rhs) const noexcept {
     assert(isValid() && rhs.isValid());
-    SourceLocation result;
-    if (offset > rhs.offset) {
-      result = *this;
-      result.length = offset - rhs.offset + rhs.length;
-    } else {
-      result = rhs;
-      result.length = rhs.offset - offset + length;
-    }
-    return result;
+    const SourceLocation &begin = offset <= rhs.offset ? *this : rhs;
+    const SourceLocation &end = offset <= rhs.offset ? rhs : *this;
+    return SourceLocation(begin.offset, begin.line, begin.column,
+                          end.offset - begin.offset + end.length);
   }
 };
 } // namespace svm

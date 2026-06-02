@@ -1,9 +1,10 @@
 
 
 #include "Arena.h"
+#include "ASTPrinter.h"
 #include "DiagnosticEngine.h"
 #include "Lexer.h"
-#include "Token.h"
+#include "Parser.h"
 #include "Utils.h"
 
 #include <cstdio>
@@ -12,7 +13,6 @@
 #include <string>
 #include <string_view>
 
-namespace svm {
 enum class Stage {
   TokenDump,
   AstDump,
@@ -89,36 +89,23 @@ int main(int argc, char *argv[]) {
   svm::Lexer lexer(arena, diagEngine, inputPath, sourceView);
   if (stage == Stage::TokenDump) {
     while (true) {
-      auto t = lexer.next();
-
-      switch (t.kind) {
-      case svm::TokenKind::Identifier:
-        std::fprintf(output, "%u:%u\t%s\t[%.*s]\n", t.location.line,
-                     t.location.column, t.toString(), (i32)t.text.length(),
-                     std::string(t.text.data()).c_str());
-      case svm::TokenKind::IntegerLiteral:
-        std::fprintf(output, "%u:%u\t%s\t[%d]\n", t.location.line,
-                     t.location.column, t.toString(), t.intValue);
+      auto token = lexer.next();
+      svm::dumpToken(token, output);
+      if (token.kind == svm::TokenKind::EoF)
         break;
-      case svm::TokenKind::FloatLiteral:
-        std::fprintf(output, "%u:%u\t%s\t[%g]\n", t.location.line,
-                     t.location.column, t.toString(), (double)t.floatValue);
-        break;
-      case svm::TokenKind::StringLiteral:
-        std::fprintf(output, "%u:%u\t%s\t[%s]\n", t.location.line,
-                     t.location.column, t.toString(), t.text.data());
-        break;
-      default:
-        std::fprintf(output, "%u:%u\t%s\n", t.location.line, t.location.column,
-                     t.toString());
-      }
-      if (t.kind == svm::TokenKind::EoF) {
-        break;
-      }
     }
     diagEngine.printAll();
     goto cleanup;
   }
+
+  {
+    svm::Parser parser(arena, diagEngine, lexer);
+    svm::CompUnit *compUnit = parser.parse();
+    if (stage == Stage::AstDump && diagEngine.getErrorCount() == 0)
+      svm::dumpAST(compUnit, output);
+  }
+
+  diagEngine.printAll();
 
 cleanup:
   if (outputPath) {
@@ -126,5 +113,3 @@ cleanup:
   }
   return diagEngine.getErrorCount() > 0 ? 1 : 0;
 }
-
-} // namespace svm

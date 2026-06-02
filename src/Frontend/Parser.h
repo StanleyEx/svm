@@ -79,14 +79,14 @@ private:
   };
 
   // Parse ================================
-  TypeKind getBasicTypeFromToken(const Token &token) {
+  TypeKind getBaseTypeFromToken(const Token &token) {
     switch (token.kind) {
     case TokenKind::KW_Int:
       return TypeKind::Int;
     case TokenKind::KW_Float:
       return TypeKind::Float;
     default:
-      SVM_ERROR(diagEngine_, token.location, "Expected basic type, but got %s.",
+      SVM_ERROR(diagEngine_, token.location, "Expected base type, but got %s.",
                 token.toString());
       syncronize();
       return TypeKind::Void;
@@ -94,10 +94,12 @@ private:
   }
 
   void parseTopLevelItem(std::vector<DeclNode *> &declsOut);
-  void parseVarDecl(std::vector<DeclNode *> &declsOut);
-  void parseConstDecl(std::vector<DeclNode *> &declsOut);
+  void parseVarDecl(std::vector<DeclNode *> &declsOut,
+                    SourceLocation *rangeOut = nullptr);
+  void parseConstDecl(std::vector<DeclNode *> &declsOut,
+                      SourceLocation *rangeOut = nullptr);
   void parseDeclarator(std::vector<ExprNode *> &dimsOut, const char *&nameOut,
-                       SourceLocation &nameLocOut);
+                       SourceLocation &nameLocOut, SourceLocation &rangeOut);
   InitNode *parseInitNode();
   FuncDecl *parseFuncDecl();
   FuncParam *parseFuncParam();

@@ -10,17 +10,32 @@
 #include <vector>
 
 namespace svm {
+static SourceLocation span(SourceLocation first, SourceLocation last) {
+  if (!first.isValid())
+    return last;
+  if (!last.isValid())
+    return first;
+  return first + last;
+}
+
+static SourceLocation endOf(ASTNode *node, SourceLocation fallback) {
+  return node ? node->getLocation() : fallback;
+}
+
 CompUnit *Parser::parse() noexcept {
-  SourceLocation start = peek().location;
+  UNUSED(peek());
+  SourceLocation start(0, 1, 1, 0);
 
   std::vector<DeclNode *> decls;
   while (peek().kind != TokenKind::EoF) {
     parseTopLevelItem(decls);
   }
+  SourceLocation end = peek().location;
 
   u64 count = 0;
   auto buffer = arena_.storeVectorToArena(decls, count);
-  return arena_.create<CompUnit>(start, lexer_.filename(), buffer, count);
+  return arena_.create<CompUnit>(span(start, end), lexer_.filename(), buffer,
+                                 count);
 }
 
 void Parser::parseTopLevelItem(std::vector<DeclNode *> &declsOut) {
@@ -55,81 +70,106 @@ void Parser::parseTopLevelItem(std::vector<DeclNode *> &declsOut) {
     SVM_ERROR(diagEngine_, cur.location,
               "Expected declaration of function definition, but got %s.",
               cur.toString());
+    syncronize();
     return;
   }
 }
 
 // VarDecl -> BType VarDef {',' VarDef ';'}
 // VarDef -> Ident {'['] ConstExpr [']'} ['=' InitVal]
-void Parser::parseVarDecl(std::vector<DeclNode *> &declsOut) {
-  auto basicType = getBasicTypeFromToken(peek());
+void Parser::parseVarDecl(std::vector<DeclNode *> &declsOut,
+                          SourceLocation *rangeOut) {
+  usize firstDecl = declsOut.size();
+  auto startLoc = peek().location;
+  auto baseType = getBaseTypeFromToken(peek());
   advance();
 
   do {
     std::vector<ExprNode *> dims;
     const char *name = nullptr; // Ident
-    SourceLocation nameLoc;
-    parseDeclarator(dims, name, nameLoc);
+    SourceLocation nameLoc, declRange;
+    parseDeclarator(dims, name, nameLoc, declRange);
 
     InitNode *init = nullptr;
-    match(TokenKind::Assign);
-    if (peek().kind != TokenKind::Semicolon)
+    if (match(TokenKind::Assign)) {
       init = parseInitNode();
+      declRange = span(declRange, init->getLocation());
+    }
 
     u64 dimCount = 0;
     auto buffer = arena_.storeVectorToArena(dims, dimCount);
-    declsOut.push_back(arena_.create<VarDecl>(nameLoc, name, basicType, buffer,
+    declsOut.push_back(arena_.create<VarDecl>(declRange, name, baseType, buffer,
                                               dimCount, init));
   } while (match(TokenKind::Comma));
 
-  expect(TokenKind::Semicolon, "';' after variable declaration");
+  auto semicolonLoc =
+      expect(TokenKind::Semicolon, "';' after variable declaration").location;
+  auto fullRange = span(startLoc, semicolonLoc);
+  if (rangeOut)
+    *rangeOut = fullRange;
+  if (declsOut.size() == firstDecl + 1)
+    declsOut[firstDecl]->setLocation(fullRange);
 }
 
 // ConstDecl -> 'const' BType ConstDef {',' ConstDef } ';'
 // ConstDef -> Ident {'['] ConstExpr [']'} '=' ConstInitVal
-void Parser::parseConstDecl(std::vector<DeclNode *> &declsOut) {
+void Parser::parseConstDecl(std::vector<DeclNode *> &declsOut,
+                            SourceLocation *rangeOut) {
+  usize firstDecl = declsOut.size();
   auto constLoc = peek().location;
   advance(); // const
-  auto basicType = getBasicTypeFromToken(peek());
+  auto baseType = getBaseTypeFromToken(peek());
   advance();
 
   do {
     std::vector<ExprNode *> dims;
     const char *name = nullptr;
-    SourceLocation nameLoc;
-    parseDeclarator(dims, name, nameLoc);
+    SourceLocation nameLoc, declRange;
+    parseDeclarator(dims, name, nameLoc, declRange);
 
     if (!match(TokenKind::Assign))
       SVM_ERROR(diagEngine_, constLoc + peek().location,
                 "Const declaration '%s' requires an initializer.", name);
     InitNode *init = parseInitNode();
+    declRange = span(declRange, init->getLocation());
 
     u64 dimCount = 0;
     auto buffer = arena_.storeVectorToArena(dims, dimCount);
-    declsOut.push_back(arena_.create<ConstDecl>(nameLoc, name, basicType,
+    declsOut.push_back(arena_.create<ConstDecl>(declRange, name, baseType,
                                                 buffer, dimCount, init));
   } while (match(TokenKind::Comma));
-  expect(TokenKind::Semicolon, "';' after constant declaration");
+  auto semicolonLoc =
+      expect(TokenKind::Semicolon, "';' after constant declaration").location;
+  auto fullRange = span(constLoc, semicolonLoc);
+  if (rangeOut)
+    *rangeOut = fullRange;
+  if (declsOut.size() == firstDecl + 1)
+    declsOut[firstDecl]->setLocation(fullRange);
 }
 
 void Parser::parseDeclarator(std::vector<ExprNode *> &dimsOut,
-                             const char *&nameOut, SourceLocation &nameLocOut) {
+                             const char *&nameOut, SourceLocation &nameLocOut,
+                             SourceLocation &rangeOut) {
   auto &ident = peek();
   if (ident.kind != TokenKind::Identifier) {
     SVM_ERROR(diagEngine_, ident.location,
               "Expected function name, but got %s.", ident.toString());
     nameOut = "<Error>";
     nameLocOut = ident.location;
+    rangeOut = ident.location;
     return;
   }
 
   nameOut = arena_.duplicateString(ident.text.data(), ident.text.size());
   nameLocOut = ident.location;
+  rangeOut = ident.location;
   advance();
 
   while (match(TokenKind::LBracket)) {
     auto *expr = parseExpr();
-    expect(TokenKind::RBracket, "']' after array dimension");
+    auto rBracketLoc =
+        expect(TokenKind::RBracket, "']' after array dimension").location;
+    rangeOut = span(rangeOut, rBracketLoc);
     if (expr)
       dimsOut.push_back(expr);
   }
@@ -159,7 +199,7 @@ InitNode *Parser::parseInitNode() {
   }
 
   auto expr = parseExpr();
-  return arena_.create<InitExpr>(cur.location, expr);
+  return arena_.create<InitExpr>(endOf(expr, cur.location), expr);
 }
 
 // FuncDef     -> FuncType Ident '(' [FuncFParams] ')' Block
@@ -218,20 +258,26 @@ FuncDecl *Parser::parseFuncDecl() {
 
   BlockStmt *body = nullptr;
   // 支持函数定义 如果后面跟的是分号 那么这个语句就是函数定义 body为空
-  if (!match(TokenKind::Semicolon))
+  SourceLocation funcRange = span(returnTypeLoc, RParenLoc);
+  if (peek().kind == TokenKind::Semicolon) {
+    auto semicolonLoc = advance().location;
+    funcRange = span(returnTypeLoc, semicolonLoc);
+  } else {
     body = parseBlock();
+    funcRange = span(returnTypeLoc, body->getLocation());
+  }
 
   u64 paramCount = 0;
   auto buffer = arena_.storeVectorToArena(params, paramCount);
-  return arena_.create<FuncDecl>(returnTypeLoc + RParenLoc, name, returnType,
-                                 buffer, paramCount, body);
+  return arena_.create<FuncDecl>(funcRange, name, returnType, buffer,
+                                 paramCount, body);
 }
 
 FuncParam *Parser::parseFuncParam() {
-  auto basicType = getBasicTypeFromToken(peek());
-  if (basicType == TypeKind::Void)
+  auto baseType = getBaseTypeFromToken(peek());
+  if (baseType == TypeKind::Void)
     return nullptr;
-  auto basicTypeLoc = peek().location;
+  auto baseTypeLoc = peek().location;
   advance();
 
   auto &ident = peek();
@@ -241,16 +287,23 @@ FuncParam *Parser::parseFuncParam() {
     return nullptr;
   }
   auto name = arena_.duplicateString(ident.text.data(), ident.text.size());
+  auto identLoc = ident.location;
   advance();
 
   bool isArray = false;
+  SourceLocation paramRange = span(baseTypeLoc, identLoc);
   std::vector<ExprNode *> dims;
   if (match(TokenKind::LBracket)) {
     isArray = true;
-    expect(TokenKind::RBracket, "']' for omitted first parameter dimension");
+    paramRange =
+        span(paramRange, expect(TokenKind::RBracket,
+                                "']' for omitted first parameter dimension")
+                             .location);
     while (match(TokenKind::LBracket)) {
       auto expr = parseExpr();
-      expect(TokenKind::RBracket, "']' after array dimension");
+      auto rBracketLoc =
+          expect(TokenKind::RBracket, "']' after array dimension").location;
+      paramRange = span(paramRange, rBracketLoc);
       if (expr)
         dims.push_back(expr);
     }
@@ -258,8 +311,8 @@ FuncParam *Parser::parseFuncParam() {
 
   u64 dimCount = 0;
   auto buffer = arena_.storeVectorToArena(dims, dimCount);
-  return arena_.create<FuncParam>(basicTypeLoc, name, basicType, isArray,
-                                  buffer, dimCount);
+  return arena_.create<FuncParam>(paramRange, name, baseType, isArray, buffer,
+                                  dimCount);
 }
 
 BlockStmt *Parser::parseBlock() {
@@ -285,22 +338,24 @@ BlockStmt *Parser::parseBlock() {
         stmts.push_back(stmt);
     }
   }
-  expect(TokenKind::RBrace, "'}' to close block");
+  auto RBraceLoc = expect(TokenKind::RBrace, "'}' to close block").location;
 
   u64 stmtCount = 0;
   auto buffer = arena_.storeVectorToArena(stmts, stmtCount);
-  return arena_.create<BlockStmt>(LBraceLoc, buffer, stmtCount);
+  return arena_.create<BlockStmt>(span(LBraceLoc, RBraceLoc), buffer,
+                                  stmtCount);
 }
 
 void Parser::parseLocalDecl(std::vector<StmtNode *> &declsOut) {
   std::vector<DeclNode *> decls;
+  SourceLocation declRange;
   if (peek().kind == TokenKind::KW_Const)
-    parseConstDecl(decls);
+    parseConstDecl(decls, &declRange);
   else
-    parseVarDecl(decls);
+    parseVarDecl(decls, &declRange);
 
   for (auto decl : decls)
-    declsOut.push_back(arena_.create<DeclStmt>(decl->getLocation(), decl));
+    declsOut.push_back(arena_.create<DeclStmt>(declRange, decl));
 }
 
 StmtNode *Parser::parseStmt() {
@@ -324,7 +379,9 @@ StmtNode *Parser::parseStmt() {
     if (match(TokenKind::KW_Else))
       elseStmt = parseStmt();
 
-    return arena_.create<IfStmt>(loc + RParenLoc, cond, thenStmt, elseStmt);
+    auto endLoc =
+        elseStmt ? elseStmt->getLocation() : endOf(thenStmt, RParenLoc);
+    return arena_.create<IfStmt>(span(loc, endLoc), cond, thenStmt, elseStmt);
   }
   case TokenKind::KW_While: {
     auto loc = cur.location;
@@ -334,7 +391,8 @@ StmtNode *Parser::parseStmt() {
     auto RParenLoc =
         expect(TokenKind::RParen, "')' to close 'while' condition").location;
     auto body = parseStmt();
-    return arena_.create<WhileStmt>(loc + RParenLoc, cond, body);
+    return arena_.create<WhileStmt>(span(loc, endOf(body, RParenLoc)), cond,
+                                    body);
   }
   case TokenKind::KW_Break: {
     auto loc = cur.location;
@@ -342,7 +400,7 @@ StmtNode *Parser::parseStmt() {
     auto semicolonToken = expect(TokenKind::Semicolon, "';' after 'break'");
     if (semicolonToken.kind != TokenKind::Semicolon)
       syncronize();
-    return arena_.create<BreakStmt>(loc);
+    return arena_.create<BreakStmt>(span(loc, semicolonToken.location));
   }
   case TokenKind::KW_Continue: {
     auto loc = cur.location;
@@ -350,7 +408,7 @@ StmtNode *Parser::parseStmt() {
     auto semicolonToken = expect(TokenKind::Semicolon, "';' after 'continue'");
     if (semicolonToken.kind != TokenKind::Semicolon)
       syncronize();
-    return arena_.create<ContinueStmt>(loc);
+    return arena_.create<ContinueStmt>(span(loc, semicolonToken.location));
   }
   case TokenKind::KW_Return: {
     auto loc = cur.location;
@@ -361,7 +419,7 @@ StmtNode *Parser::parseStmt() {
     auto semicolonToken = expect(TokenKind::Semicolon, "';' after 'return'");
     if (semicolonToken.kind != TokenKind::Semicolon)
       syncronize();
-    return arena_.create<ReturnStmt>(loc, expr);
+    return arena_.create<ReturnStmt>(span(loc, semicolonToken.location), expr);
   }
   default:
     return parseExprOrAssignStmt();
@@ -382,7 +440,8 @@ StmtNode *Parser::parseExprOrAssignStmt() {
     auto semicolonToken = expect(TokenKind::Semicolon, "';' after assignment");
     if (semicolonToken.kind != TokenKind::Semicolon)
       syncronize();
-    return arena_.create<AssignStmt>(loc, lhs, rhs);
+    return arena_.create<AssignStmt>(span(loc, semicolonToken.location), lhs,
+                                     rhs);
   }
 
   auto semicolonToken =
@@ -392,7 +451,7 @@ StmtNode *Parser::parseExprOrAssignStmt() {
 
   if (!lhs) // 按道理不会出现
     return arena_.create<EmptyStmt>(loc);
-  return arena_.create<ExprStmt>(loc, lhs);
+  return arena_.create<ExprStmt>(span(loc, semicolonToken.location), lhs);
 }
 
 ExprNode *Parser::parseExpr() {
@@ -405,11 +464,11 @@ ExprNode *Parser::parseExpr() {
 ExprNode *Parser::parseLogicOr() {
   auto lhs = parseLogicAnd();
   while (peek().kind == TokenKind::OrOr) {
-    auto loc = peek().location;
     advance();
     auto rhs = parseLogicAnd();
-    lhs =
-        arena_.create<BinaryExpr>(loc, BinaryExpr::BinaryOp::LogicOr, lhs, rhs);
+    lhs = arena_.create<BinaryExpr>(
+        span(endOf(lhs, SourceLocation()), endOf(rhs, SourceLocation())),
+        BinaryExpr::BinaryOp::LogicOr, lhs, rhs);
   }
   return lhs;
 }
@@ -418,11 +477,11 @@ ExprNode *Parser::parseLogicOr() {
 ExprNode *Parser::parseLogicAnd() {
   auto lhs = parseEq();
   while (peek().kind == TokenKind::AndAnd) {
-    auto loc = peek().location;
     advance();
     auto rhs = parseEq();
-    lhs = arena_.create<BinaryExpr>(loc, BinaryExpr::BinaryOp::LogicAnd, lhs,
-                                    rhs);
+    lhs = arena_.create<BinaryExpr>(
+        span(endOf(lhs, SourceLocation()), endOf(rhs, SourceLocation())),
+        BinaryExpr::BinaryOp::LogicAnd, lhs, rhs);
   }
   return lhs;
 }
@@ -431,12 +490,13 @@ ExprNode *Parser::parseLogicAnd() {
 ExprNode *Parser::parseEq() {
   auto lhs = parseRel();
   while (peek().kind == TokenKind::Eq || peek().kind == TokenKind::NotEq) {
-    auto loc = peek().location;
     auto op = (peek().kind == TokenKind::Eq) ? BinaryExpr::BinaryOp::Eq
                                              : BinaryExpr::BinaryOp::NotEq;
     advance();
     auto rhs = parseRel();
-    lhs = arena_.create<BinaryExpr>(loc, op, lhs, rhs);
+    lhs = arena_.create<BinaryExpr>(
+        span(endOf(lhs, SourceLocation()), endOf(rhs, SourceLocation())), op,
+        lhs, rhs);
   }
   return lhs;
 }
@@ -463,10 +523,11 @@ ExprNode *Parser::parseRel() {
     default:
       return lhs;
     }
-    auto loc = peek().location;
     advance();
     auto rhs = parseAdd();
-    lhs = arena_.create<BinaryExpr>(loc, op, lhs, rhs);
+    lhs = arena_.create<BinaryExpr>(
+        span(endOf(lhs, SourceLocation()), endOf(rhs, SourceLocation())), op,
+        lhs, rhs);
   }
   return lhs;
 }
@@ -475,12 +536,13 @@ ExprNode *Parser::parseRel() {
 ExprNode *Parser::parseAdd() {
   auto lhs = parseMul();
   while (peek().kind == TokenKind::Plus || peek().kind == TokenKind::Minus) {
-    auto loc = peek().location;
     auto op = (peek().kind == TokenKind::Plus) ? BinaryExpr::BinaryOp::Add
                                                : BinaryExpr::BinaryOp::Sub;
     advance();
     auto rhs = parseMul();
-    lhs = arena_.create<BinaryExpr>(loc, op, lhs, rhs);
+    lhs = arena_.create<BinaryExpr>(
+        span(endOf(lhs, SourceLocation()), endOf(rhs, SourceLocation())), op,
+        lhs, rhs);
   }
   return lhs;
 }
@@ -504,10 +566,11 @@ ExprNode *Parser::parseMul() {
     default:
       return lhs;
     }
-    auto loc = peek().location;
     advance();
     auto rhs = parseUnary();
-    lhs = arena_.create<BinaryExpr>(loc, op, lhs, rhs);
+    lhs = arena_.create<BinaryExpr>(
+        span(endOf(lhs, SourceLocation()), endOf(rhs, SourceLocation())), op,
+        lhs, rhs);
   }
   return lhs;
 }
@@ -535,14 +598,15 @@ ExprNode *Parser::parseUnary() {
     }
     advance();
     auto operand = parseUnary();
-    return arena_.create<UnaryExpr>(loc, op, operand);
+    return arena_.create<UnaryExpr>(span(loc, endOf(operand, loc)), op,
+                                    operand);
   }
   return parsePrimary();
 }
 
 // PrimaryExp -> '(' Exp ')' | LVal | Number
 ExprNode *Parser::parsePrimary() {
-  auto &cur = peek();
+  auto cur = peek();
   switch (cur.kind) {
   case TokenKind::IntegerLiteral: {
     advance();
@@ -553,9 +617,13 @@ ExprNode *Parser::parsePrimary() {
     return arena_.create<FloatLiteralExpr>(cur.location, cur.floatValue);
   }
   case TokenKind::LParen: {
+    auto LParenLoc = cur.location;
     advance();
     auto expr = parseExpr();
-    expect(TokenKind::RParen, "')' to close paren expression");
+    auto RParenLoc =
+        expect(TokenKind::RParen, "')' to close paren expression").location;
+    if (expr)
+      expr->setLocation(span(LParenLoc, RParenLoc));
     return expr;
   }
   case TokenKind::Identifier: {
@@ -576,24 +644,29 @@ ExprNode *Parser::parseCallOrLVal(const char *name, SourceLocation nameLoc) {
     std::vector<ExprNode *> args;
     if (peek().kind != TokenKind::RParen)
       parseFuncRParams(args);
-    expect(TokenKind::RParen, "')' to close function call");
+    auto RParenLoc =
+        expect(TokenKind::RParen, "')' to close function call").location;
 
     u64 argCount = 0;
     auto buffer = arena_.storeVectorToArena(args, argCount);
-    return arena_.create<CallExpr>(nameLoc, name, buffer, argCount);
+    return arena_.create<CallExpr>(span(nameLoc, RParenLoc), name, buffer,
+                                   argCount);
   }
 
   std::vector<ExprNode *> subscripts;
+  SourceLocation range = nameLoc;
   while (match(TokenKind::LBracket)) {
     auto expr = parseExpr();
-    expect(TokenKind::RBracket, "']' after array subscript");
+    auto RBracketLoc =
+        expect(TokenKind::RBracket, "']' after array subscript").location;
+    range = span(range, RBracketLoc);
     if (expr)
       subscripts.push_back(expr);
   }
 
   u64 subscriptCount = 0;
   auto buffer = arena_.storeVectorToArena(subscripts, subscriptCount);
-  return arena_.create<LValueExpr>(nameLoc, name, buffer, subscriptCount);
+  return arena_.create<LValueExpr>(range, name, buffer, subscriptCount);
 }
 
 // FuncRParams -> Exp { ',' Exp }

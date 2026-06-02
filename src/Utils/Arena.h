@@ -134,44 +134,26 @@ public:
     void *memory = allocate(sizeof(T), alignof(T));
     T *obj = new (memory) T(std::forward<Args>(args)...);
     if constexpr (!std::is_trivially_destructible_v<T>) {
-      try {
-        destructors_.emplace_back([obj]() { obj->~T(); });
-      } catch (...) {
-        obj->~T();
-        throw;
-      }
+      destructors_.emplace_back([obj]() { obj->~T(); });
     }
     return obj;
   }
 
   template <typename T> T *createArray(usize count) {
-    assert(count > 0);
+    if (count == 0) {
+      return nullptr;
+    }
     void *memory = allocate(sizeof(T) * count, alignof(T));
     T *array = static_cast<T *>(memory);
-    usize constructed = 0;
-    try {
-      for (; constructed < count; ++constructed) {
-        new (array + constructed) T();
-      }
-    } catch (...) {
-      for (usize j = constructed; j > 0; --j) {
-        array[j - 1].~T();
-      }
-      throw;
+    for (usize i = 0; i < count; ++i) {
+      new (array + i) T();
     }
     if constexpr (!std::is_trivially_destructible_v<T>) {
-      try {
-        destructors_.emplace_back([array, count]() {
-          for (usize i = count; i > 0; --i) {
-            array[i - 1].~T();
-          }
-        });
-      } catch (...) {
+      destructors_.emplace_back([array, count]() {
         for (usize i = count; i > 0; --i) {
           array[i - 1].~T();
         }
-        throw;
-      }
+      });
     }
     return array;
   }
@@ -182,7 +164,8 @@ public:
     sizeOut = vector.size();
     if (vector.empty())
       return nullptr;
-    T **buffer = allocate(sizeof(T *) * vector.size(), alignof(T *));
+    auto **buffer =
+        static_cast<T **>(allocate(sizeof(T *) * vector.size(), alignof(T *)));
     std::memcpy(buffer, vector.data(), sizeof(T *) * vector.size());
     return buffer;
   }
