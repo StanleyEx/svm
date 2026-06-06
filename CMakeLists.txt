@@ -59,7 +59,12 @@ target_include_directories(svm_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Utils
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Frontend
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/IR
 )
 
 add_executable(svm ${MAIN_SOURCE})
-target_link_libraries(svm PRIVATE svm_core)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_link_libraries(svm PRIVATE "-Wl,--whole-archive" svm_core "-Wl,--no-whole-archive")
+else()
+    target_link_libraries(svm PRIVATE svm_core)
+endif()
