@@ -6,17 +6,6 @@
 
 namespace svm {
 namespace ir {
-namespace {
-
-bool canConvertToI32(f32 value) noexcept {
-  if (!std::isfinite(value))
-    return false;
-  const f64 truncated = std::trunc(static_cast<f64>(value));
-  return truncated >= static_cast<f64>(std::numeric_limits<i32>::min()) &&
-         truncated <= static_cast<f64>(std::numeric_limits<i32>::max());
-}
-
-} // namespace
 
 IRBuilder::IRBuilder(Module *module, Function *function) noexcept
     : module_(module), function_(function) {
@@ -26,7 +15,7 @@ IRBuilder::IRBuilder(Module *module, Function *function) noexcept
 
 void IRBuilder::setInsertAtEnd(BasicBlock *block) noexcept {
   insertBlock_ = block;
-  insertAfter_ = block ? block->instLast : nullptr;
+  insertAfter_ = block ? block->instLast_ : nullptr;
 }
 
 void IRBuilder::setInsertAtStart(BasicBlock *block) noexcept {
@@ -35,15 +24,15 @@ void IRBuilder::setInsertAtStart(BasicBlock *block) noexcept {
 }
 
 void IRBuilder::setInsertAfter(Inst *inst) noexcept {
-  assert(inst && inst->block);
-  insertBlock_ = inst->block;
+  assert(inst && inst->block_);
+  insertBlock_ = inst->block_;
   insertAfter_ = inst;
 }
 
 void IRBuilder::setInsertBefore(Inst *inst) noexcept {
-  assert(inst && inst->block);
-  insertBlock_ = inst->block;
-  insertAfter_ = inst->prev;
+  assert(inst && inst->block_);
+  insertBlock_ = inst->block_;
+  insertAfter_ = inst->prev_;
 }
 
 Inst *IRBuilder::newInst(OpCode op, IRType type, u32 operandCount) {
@@ -98,52 +87,44 @@ Inst *IRBuilder::newInst(OpCode op, IRType type, u32 operandCount) {
   }
 
   inst->arena = function_->arena;
-  inst->prev = nullptr;
-  inst->next = nullptr;
-  inst->block = nullptr;
+  inst->prev_ = nullptr;
+  inst->next_ = nullptr;
+  inst->block_ = nullptr;
   inst->id = function_->instCount++;
   inst->sourceLocation = currentSourceLocation_;
   return inst;
 }
 
 void IRBuilder::attach(Inst *inst) {
-  assert(inst && insertBlock_ && !inst->block);
-  inst->block = insertBlock_;
+  assert(inst && insertBlock_ && !inst->block_);
 
   if (inst->getOp() == OP_PHI) {
-    inst->prev = insertBlock_->phiLast;
-    if (insertBlock_->phiLast)
-      insertBlock_->phiLast->next = inst;
-    else
-      insertBlock_->phiFirst = inst;
-    insertBlock_->phiLast = inst;
+    if (insertBlock_->phiLast_)
+      inst->linkAfter(insertBlock_->phiLast_);
+    else {
+      inst->block_ = insertBlock_;
+      insertBlock_->phiFirst_ = insertBlock_->phiLast_ = inst;
+    }
     insertAfter_ = inst;
     return;
   }
 
   Inst *after = insertAfter_;
   if (after) {
-    assert(after->block == insertBlock_);
+    assert(after->block_ == insertBlock_);
     if (after->getOp() == OP_PHI)
       after = nullptr;
   }
 
   if (!after) {
-    inst->next = insertBlock_->instFirst;
-    if (insertBlock_->instFirst)
-      insertBlock_->instFirst->prev = inst;
-    else
-      insertBlock_->instLast = inst;
-    insertBlock_->instFirst = inst;
-  } else {
-    inst->prev = after;
-    inst->next = after->next;
-    if (after->next)
-      after->next->prev = inst;
-    else
-      insertBlock_->instLast = inst;
-    after->next = inst;
-  }
+    if (insertBlock_->instFirst_)
+      inst->linkBefore(insertBlock_->instFirst_);
+    else {
+      inst->block_ = insertBlock_;
+      insertBlock_->instFirst_ = insertBlock_->instLast_ = inst;
+    }
+  } else
+    inst->linkAfter(after);
   insertAfter_ = inst;
 }
 
@@ -216,6 +197,45 @@ Inst *IRBuilder::replaceInPlace(Inst *victim, OpCode op, IRType type,
   victim->setArg(0, arg0);
   victim->setArg(1, arg1);
   return victim;
+}
+
+Inst *IRBuilder::replaceWithJump(Inst *victim, BasicBlock *target) {
+  assert(victim && target);
+  const OpCode op = function_->phase == IRPhase::MIR ? MOP_J : OP_JMP;
+  Inst *jump = replaceInPlace(victim, op, TY_VOID);
+  jump->setJumpTarget(target);
+  return jump;
+}
+
+Inst *IRBuilder::replaceWithBranch(Inst *victim, Inst *condition,
+                                   BasicBlock *trueBlock,
+                                   BasicBlock *falseBlock) {
+  assert(victim && condition && trueBlock && falseBlock);
+  assert(function_->phase != IRPhase::MIR);
+  Inst *branch = replaceInPlace(victim, OP_BR, TY_VOID, condition);
+  branch->mutableBranch() = {trueBlock, falseBlock};
+  return branch;
+}
+
+Inst *IRBuilder::replaceWithJumpAndEraseSuffix(Inst *victim,
+                                               BasicBlock *target) {
+  Inst *jump = replaceWithJump(victim, target);
+  eraseAfter(jump);
+  return jump;
+}
+
+void IRBuilder::eraseAfter(Inst *anchor) {
+  assert(anchor && anchor->block_);
+  std::vector<Inst *> dead;
+  for (Inst *inst = anchor->next_; inst; inst = inst->next_)
+    dead.push_back(inst);
+  for (Inst *inst : dead)
+    inst->dropAllOperands();
+  for (Inst *inst : dead) {
+    const bool erased = inst->eraseFromBlock();
+    assert(erased);
+    UNUSED(erased);
+  }
 }
 
 Inst *IRBuilder::iConstImpl(i32 value, IRType type) {
@@ -412,7 +432,7 @@ Inst *IRBuilder::emitPhi(IRType type, BasicBlock *block, Inst *initialValue) {
   BasicBlock *savedBlock = insertBlock_;
   Inst *savedAfter = insertAfter_;
   insertBlock_ = block;
-  insertAfter_ = block->phiLast;
+  insertAfter_ = block->phiLast_;
 
   const u32 count = block->getPredecessorCount();
   Inst *phi = newInst(OP_PHI, type, count);
@@ -611,15 +631,15 @@ Inst *IRBuilder::emitSwitch(Inst *selector, const SwitchCase *cases,
                             u32 caseCount, BasicBlock *defaultTarget) {
   assert(selector && defaultTarget && (caseCount == 0 || cases));
   for (u32 index = 1; index < caseCount; ++index)
-    assert(cases[index - 1].value < cases[index].value);
+    assert(cases[index - 1].getValue() < cases[index].getValue());
 
   Inst *switchInst = emit(OP_SWITCH, TY_VOID, selector);
   SwitchPayload &payload = switchInst->mutableSwitch();
-  payload.caseCount = caseCount;
-  payload.defaultTarget = defaultTarget;
-  payload.cases = function_->arena->createArray<SwitchCase>(caseCount);
+  payload.caseCount_ = caseCount;
+  payload.defaultTarget_ = defaultTarget;
+  payload.cases_ = function_->arena->createArray<SwitchCase>(caseCount);
   if (caseCount)
-    std::memcpy(payload.cases, cases, sizeof(SwitchCase) * caseCount);
+    std::memcpy(payload.cases_, cases, sizeof(SwitchCase) * caseCount);
   return switchInst;
 }
 
@@ -680,12 +700,12 @@ Inst *IRBuilder::cloneInst(const Inst *source) {
     break;
   }
   case OP_SWITCH: {
-    clone->switch_->caseCount = source->switch_->caseCount;
-    clone->switch_->defaultTarget = source->switch_->defaultTarget;
-    const u32 count = source->switch_->caseCount;
-    clone->switch_->cases = function_->arena->createArray<SwitchCase>(count);
+    clone->switch_->caseCount_ = source->switch_->caseCount_;
+    clone->switch_->defaultTarget_ = source->switch_->defaultTarget_;
+    const u32 count = source->switch_->caseCount_;
+    clone->switch_->cases_ = function_->arena->createArray<SwitchCase>(count);
     if (count)
-      std::memcpy(clone->switch_->cases, source->switch_->cases,
+      std::memcpy(clone->switch_->cases_, source->switch_->cases_,
                   sizeof(SwitchCase) * count);
     break;
   }

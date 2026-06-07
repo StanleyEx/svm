@@ -1,8 +1,11 @@
 #ifndef TYPES_H
 #define TYPES_H
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <type_traits>
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -23,6 +26,18 @@ using isize = std::ptrdiff_t;
 
 using uintptr = std::uintptr_t;
 using intptr = std::intptr_t;
+
+template <typename Float,
+          std::enable_if_t<std::is_floating_point_v<Float>, int> = 0>
+bool canConvertToI32(Float value) noexcept {
+  if (!std::isfinite(value))
+    return false;
+
+  const long double truncated = std::trunc(static_cast<long double>(value));
+  return truncated >=
+             static_cast<long double>(std::numeric_limits<i32>::min()) &&
+         truncated <= static_cast<long double>(std::numeric_limits<i32>::max());
+}
 
 constexpr i32 i32FromBits(u32 bits) noexcept {
   return bits <= static_cast<u32>(INT32_MAX)

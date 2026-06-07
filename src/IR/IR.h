@@ -31,12 +31,6 @@ enum class MIRPhase : u8 {
   Emittable,
 };
 
-enum VerifyLevel : u8 {
-  Light,
-  Standard,
-  Heavy,
-};
-
 enum IRType : u8 {
   TY_VOID, // 控制语句
   TY_I1,   // bool
@@ -137,16 +131,17 @@ enum OpCode : u16 {
             // scf.r[0] = then : Region, scf.r[1] = else : Region
   OP_WHILE, // NOARG, [ScfPayload] -> TY_VOID
             // scf.r[0] = cond : Region, scf.r[1] = body : Region
-  /// @brief 仿射IV循环 for(; iv != stop; iv += step) { body; }
+  /// @brief 仿射IV循环 for(; direction(iv, stop); iv += step) { body; }
   ///
   /// arg0 = stop : TY_I32
   /// arg1 = step : TY_I32
   /// arg2 = ivAddr : TY_PTR
   /// -> TY_VOID
   /// Payload字段: body_ [Region]
+  /// 常量负步长使用iv > stop，其余步长必须满足正向契约并使用iv < stop。
   /// 在HIR到LIR阶段(expand_for)会被降级为标准的旋转后循环:
   /// [init_bb]:   初始化ivAddr
-  /// [header_bb]: load iv, cmp iv != stop, br cond exit_bb / loop_bb
+  /// [header_bb]: load iv, cmp direction(iv, stop), br cond loop_bb / exit_bb
   /// [loop_bb]:   完成后: iv+step -> store ivAddr -> br header_bb
   /// [exit_bb]:   循环退出
   OP_FOR,
@@ -416,15 +411,41 @@ struct GlobalInitSegment {
   void *data = nullptr;
 };
 
-struct SwitchCase {
-  i32 value = 0;
-  BasicBlock *target = nullptr;
+class SwitchCase {
+public:
+  SwitchCase() noexcept = default;
+  SwitchCase(i32 value, BasicBlock *target) noexcept
+      : value_(value), target_(target) {}
+
+  i32 getValue() const noexcept { return value_; }
+  BasicBlock *getTarget() const noexcept { return target_; }
+
+private:
+  i32 value_ = 0;                // case 常量
+  BasicBlock *target_ = nullptr; // case CFG 目标
+
+  friend class IRBuilder;
+  friend class CFGEditor;
+  friend class DeepCopy;
 };
 
-struct SwitchPayload {
-  u32 caseCount = 0;
-  SwitchCase *cases = nullptr;         // 按照value升序
-  BasicBlock *defaultTarget = nullptr; // 永不为空
+class SwitchPayload {
+public:
+  u32 getCaseCount() const noexcept { return caseCount_; }
+  const SwitchCase &getCase(u32 index) const noexcept {
+    assert(index < caseCount_);
+    return cases_[index];
+  }
+  BasicBlock *getDefaultTarget() const noexcept { return defaultTarget_; }
+
+private:
+  u32 caseCount_ = 0;                   // case 数量
+  SwitchCase *cases_ = nullptr;         // 按 value 升序的 case 数组
+  BasicBlock *defaultTarget_ = nullptr; // 非空默认 CFG 目标
+
+  friend class IRBuilder;
+  friend class CFGEditor;
+  friend class DeepCopy;
 };
 
 /// @brief JumpTable
@@ -439,32 +460,38 @@ struct SwitchPayload {
 ///                   addr = base + delta;
 ///                   jr addr (MOP_JT_DISPATCH)
 struct JumpTable {
-  const char *label = nullptr;
-  i32 minValue = 0;
-  u32 entryCount = 0;
-  BasicBlock *defaultTarget = nullptr;
-  BasicBlock *boundsCheckBlock = nullptr;
-  BasicBlock *tableLookupBlock = nullptr;
-  JumpTable *next = nullptr;
+  const char *label = nullptr;            // 汇编标号
+  i32 minValue = 0;                       // 最小 case 值
+  BasicBlock *boundsCheckBlock = nullptr; // 边界检查块
+  BasicBlock *tableLookupBlock = nullptr; // 表查找块
+  JumpTable *next = nullptr;              // 函数内下一张表
+
+  BasicBlock *getDefaultTarget() const noexcept { return defaultTarget_; }
+  u32 getEntryCount() const noexcept { return entryCount_; }
 
   BasicBlock *getTarget(u32 k) const noexcept {
-    assert(k < entryCount);
+    assert(k < entryCount_);
     return target_ ? target_[k] : nullptr;
   }
+  void configure(Function *function, i32 minValue, BasicBlock *defaultTarget,
+                 BasicBlock *boundsCheckBlock, BasicBlock *tableLookupBlock,
+                 BasicBlock *const *targets, u32 count); // 一次性配置表
 
 private:
-  BasicBlock **target_ = nullptr;
+  u32 entryCount_ = 0;                  // 表项数量
+  BasicBlock *defaultTarget_ = nullptr; // 非空 默认CFG目标
+  BasicBlock **target_ = nullptr;       // 表项目标数组
 
   void resetTargets(Arena *arena, u32 n, BasicBlock *fill) noexcept {
     assert(arena);
-    entryCount = n;
+    entryCount_ = n;
     target_ = arena->createArray<BasicBlock *>(n ? n : 1);
     for (u32 k = 0; k < n; ++k)
       target_[k] = fill;
   }
 
   void setTarget(u32 k, BasicBlock *target) noexcept {
-    assert(k < entryCount && target_);
+    assert(k < entryCount_ && target_);
     target_[k] = target;
   }
 
@@ -573,9 +600,6 @@ struct ScfPayload {
 class Inst {
 public:
   Arena *arena = nullptr;                         // 所属Arena
-  Inst *prev = nullptr;                           // 链表前项
-  Inst *next = nullptr;                           // 链表后项
-  BasicBlock *block = nullptr;                    // 所属基本块
   u32 id = 0;                                     // 指令或虚拟寄存器编号
   const SourceLocation *sourceLocation = nullptr; // 非拥有源码位置
 
@@ -586,20 +610,20 @@ public:
   bool isErased() const noexcept { return erased_; }
   bool isUndefValue() const noexcept { return undefValue_; }
   OpCode getOp() const noexcept { return op_; }
-  void setOp(OpCode op, IRPhase phase) noexcept;
   IRType getType() const noexcept { return type_; }
   void setType(IRType type) noexcept { type_ = type; }
   u16 getOperandCount() const noexcept { return operandCount_; }
   Inst *getArg(u32 index) const noexcept;
   void setArg(u32 index, Inst *value) noexcept;
-  void dropOperand(u32 index) noexcept;              // 卸载单个Use
-  void dropAllOperands() noexcept;                   // 卸载全部Use
-  void eraseFromBlock() noexcept;                    // 从块中删除
+  bool eraseFromBlock() noexcept;                    // 从块中删除
   const Use *uses() const noexcept { return uses_; } // 只读Use链
-  Use *uses() noexcept { return uses_; }             // 可变Use链
   bool hasUses() const noexcept { return uses_ != nullptr; }
   bool hasNoUses() const noexcept { return uses_ == nullptr; }
   bool hasOneUse() const noexcept { return uses_ && !uses_->next; }
+  bool tracksUses() const noexcept;                 // 是否跟踪 SSA Use
+  Inst *previous() const noexcept { return prev_; } // 读取链表前项
+  Inst *next() const noexcept { return next_; }     // 读取链表后项
+  BasicBlock *parentBlock() const noexcept { return block_; } // 读取所属块
 
   i32 getImm() const noexcept;
   void setImm(i32 value) noexcept { imm_ = value; }
@@ -628,7 +652,6 @@ public:
   Region *getBody() const noexcept;
   void setBody(Region *body) noexcept { body_ = body; }
   const SwitchPayload &getSwitch() const noexcept;
-  SwitchPayload *getSwitchPayload() const noexcept;
   JumpTable *getJumpTable() const noexcept;
   BasicBlock *getIncomingBlock(u32 index) const noexcept;
   i32 getStride() const noexcept;                        // 读取GETPTR步长
@@ -646,9 +669,11 @@ public:
   void moveAfter(Inst *anchor) noexcept;         // 移到锚点后
 
   friend class IRBuilder;
+  friend class BasicBlock;
   friend class CFGEditor;
   friend class DeepCopy;
   friend struct Module;
+  friend bool computePreds(Function *function);
   friend void computeUses(Function *function);
   friend void replaceAllUsesWith(Function *function, Inst *from, Inst *to);
 
@@ -660,9 +685,12 @@ private:
   u16 operandCount_ = 0;        // 操作数数量
   bool erased_ = true;          // 是否已删除
   bool undefValue_ = false;     // 是否为undef值
-  InstRef inlineArgs_[2] = {};  // 小操作数内联存储
-  InstRef *args_ = inlineArgs_; // 当前操作数存储
+  InstRef inlineArgs_[2] = {};  // 小操作数存储
+  InstRef *args_ = inlineArgs_; // 操作数存储
   Use *uses_ = nullptr;         // Use链表头
+  Inst *prev_ = nullptr;        // 指令链表前项
+  Inst *next_ = nullptr;        // 指令链表后项
+  BasicBlock *block_ = nullptr; // 所属基本块
 
   union {
     i64 imm_;             // OP_ICONST只用低32位 但是MOP_LI可承载64位立即数
@@ -685,22 +713,24 @@ private:
   };
 
   BrPayload &mutableBranch() noexcept;                    // 分支写入口
+  void setOp(OpCode op, IRPhase phase) noexcept;          // 设置构造期操作码
   SwitchPayload &mutableSwitch() noexcept;                // Switch写入口
   void setSwitchPayload(SwitchPayload *payload) noexcept; // 设置Switch载荷
   void setJumpTarget(BasicBlock *target) noexcept;        // 设置跳转目标
   void setJumpTable(JumpTable *table) noexcept;           // 设置跳转表
   void setIncomingArray(BasicBlock **incoming) noexcept;  // 设置Phi前驱数组
   void setIncomingBlock(u32 index, BasicBlock *block) noexcept; // 设置Phi前驱
+  void dropOperand(u32 index) noexcept;                         // 卸载单个 Use
+  void dropAllOperands() noexcept;                              // 卸载全部 Use
+  BasicBlock *unlinkFromBlock() noexcept;                       // 从指令链摘除
+  void linkBefore(Inst *anchor) noexcept;                       // 链入锚点前
+  void linkAfter(Inst *anchor) noexcept;                        // 链入锚点后
+
+  friend bool cleanupDeadBlocks(Function *function);
 };
 
 class BasicBlock {
 public:
-  BasicBlock *prev = nullptr;     // Region前一块
-  BasicBlock *next = nullptr;     // Region后一块
-  Inst *phiFirst = nullptr;       // Phi链表头
-  Inst *phiLast = nullptr;        // Phi链表尾
-  Inst *instFirst = nullptr;      // 指令链表头
-  Inst *instLast = nullptr;       // 指令链表尾
   Region *parentRegion = nullptr; // 所属Region
   u32 id = 0;                     // 块编号
 
@@ -713,23 +743,42 @@ public:
 
   u32 getPredecessorCount() const noexcept { return predecessorCount_; }
   BasicBlock *getPredecessor(u32 index) const noexcept;
+  BasicBlock *previous() const noexcept { return prev_; }
+  BasicBlock *next() const noexcept { return next_; }
+  Inst *firstPhi() const noexcept { return phiFirst_; }
+  Inst *lastPhi() const noexcept { return phiLast_; }
+  Inst *firstInst() const noexcept { return instFirst_; }
+  Inst *lastInst() const noexcept { return instLast_; }
   bool empty() const noexcept;
   bool endsWithTerminator() const noexcept;
   Inst *terminator() const noexcept;
   void moveBefore(BasicBlock *anchor) noexcept;
   void moveAfter(BasicBlock *anchor) noexcept;
-  void moveToStart(Region *region) noexcept; // 移到Region首部
-  void moveToEnd(Region *region) noexcept;   // 移到Region尾部
-  void inlineBefore(Inst *anchor) noexcept;  // 内联到指令前
-  void erase() noexcept;                     // 从Region摘除
-  bool atFront() const noexcept;             // 是否Region首块
-  bool atBack() const noexcept;              // 是否Region尾块
+  void moveToStart(Region *region) noexcept;     // 移到Region首部
+  void moveToEnd(Region *region) noexcept;       // 移到Region尾部
+  void takeInstructionSuffixAfter(Inst *anchor); // 接管锚点后指令
+  void takeSingleBlockRegion(Region *source);    // 接管单块Region内容
+  bool atFront() const noexcept;                 // 是否Region首块
+  bool atBack() const noexcept;                  // 是否Region尾块
 
 private:
-  u32 predecessorCount_ = 0;            // 前驱数量
-  BasicBlock **predecessors_ = nullptr; // 前驱数组
+  BasicBlock *prev_ = nullptr;                  // Region前一块
+  BasicBlock *next_ = nullptr;                  // Region后一块
+  Inst *phiFirst_ = nullptr;                    // Phi链表头
+  Inst *phiLast_ = nullptr;                     // Phi链表尾
+  Inst *instFirst_ = nullptr;                   // 指令链表头
+  Inst *instLast_ = nullptr;                    // 指令链表尾
+  u32 predecessorCount_ = 0;                    // 前驱数量
+  BasicBlock **predecessors_ = nullptr;         // 前驱数组
+  void spliceIntoBefore(Inst *anchor) noexcept; // 把指令链并入锚点前
+  Region *unlinkFromRegion() noexcept;          // 从Region链摘除
+  void linkBefore(BasicBlock *anchor) noexcept; // 链入锚点块前
+  void linkAfter(BasicBlock *anchor) noexcept;  // 链入锚点块后
+  friend class IRBuilder;
+  friend class Inst;
   friend class CFGEditor;
-  friend void computePreds(Function *);
+  friend struct Region;
+  friend bool computePreds(Function *);
 };
 
 struct Region {
@@ -899,7 +948,13 @@ public:
   Inst *emitWhile(Region *conditionRegion, Region *bodyRegion);
   Inst *emitSwitch(Inst *selector, const SwitchCase *cases, u32 caseCount,
                    BasicBlock *defaultTarget);
-  Inst *cloneInst(const Inst *source); // 克隆单条指令
+  Inst *cloneInst(const Inst *source);                     // 克隆单条指令
+  Inst *replaceWithJump(Inst *victim, BasicBlock *target); // 替换为跳转
+  Inst *replaceWithBranch(Inst *victim, Inst *condition, BasicBlock *trueBlock,
+                          BasicBlock *falseBlock); // 替换为分支
+  Inst *replaceWithJumpAndEraseSuffix(Inst *victim,
+                                      BasicBlock *target); // 替换跳转并删除后缀
+  void eraseAfter(Inst *anchor);                           // 删除锚点后指令
 
 private:
   Inst *newInst(OpCode op, IRType type, u32 operandCount);
@@ -920,23 +975,32 @@ public:
     Inst *phi = nullptr;   // 待更新Phi
     Inst *value = nullptr; // 边值
   };
-  // 删除死边元数据
-  static void dropIncomingForRemovedEdge(Function *function, BasicBlock *pred,
-                                         BasicBlock *succ);
-  // 追加边值
-  static void addPhiEdgeValues(Function *function, BasicBlock *succ,
-                               BasicBlock *pred,
-                               const std::vector<PhiEdgeValue> &values);
-  // 追加少量边值
-  static void addPhiEdgeValues(Function *function, BasicBlock *succ,
-                               BasicBlock *pred,
-                               std::initializer_list<PhiEdgeValue> values);
-  // 删除边值
-  static bool removePhiEdgeValues(Function *function, BasicBlock *succ,
-                                  BasicBlock *pred);
-  // 迁移边值
-  static bool movePhiEdgeValues(Function *function, BasicBlock *succ,
-                                BasicBlock *oldPred, BasicBlock *newPred);
+  struct SplitBlockPredsResult {
+    BasicBlock *block = nullptr; // 新建汇合块，失败时为空
+    bool createdPhi = false;     // 是否为不同边值创建了中间Phi
+  };
+  // 分裂单条CFG边
+  static BasicBlock *splitCriticalEdge(Function *function, BasicBlock *pred,
+                                       BasicBlock *succ);
+  // 将一组前驱收束到新块
+  static SplitBlockPredsResult
+  splitBlockPredecessors(Function *function, BasicBlock *succ,
+                         BasicBlock *const *preds, u32 predCount,
+                         BasicBlock *insertAfter = nullptr);
+  // 查询去重后的语义边
+  static bool hasSemanticEdge(BasicBlock *pred, BasicBlock *succ);
+  // 查询Phi在指定边上的值
+  static Inst *getPhiIncomingValue(Inst *phi, BasicBlock *pred);
+  // 校验 predecessor/Phi/Use 对齐
+  static bool hasConsistentIncomingState(BasicBlock *block);
+  // 重定向边
+  static bool redirectEdge(Function *function, BasicBlock *pred,
+                           BasicBlock *oldSucc, BasicBlock *newSucc,
+                           const std::vector<PhiEdgeValue> &values = {});
+  // 便捷重载
+  static bool redirectEdge(Function *function, BasicBlock *pred,
+                           BasicBlock *oldSucc, BasicBlock *newSucc,
+                           std::initializer_list<PhiEdgeValue> values);
   // 替换边值
   static bool setPhiEdgeValues(Function *function, BasicBlock *succ,
                                BasicBlock *pred,
@@ -944,22 +1008,47 @@ public:
   static bool setPhiEdgeValues(Function *function, BasicBlock *succ,
                                BasicBlock *pred,
                                std::initializer_list<PhiEdgeValue> values);
-  // 重定向所有匹配后继
-  static bool rewriteSuccessorEdges(Function *function, BasicBlock *pred,
-                                    BasicBlock *oldSucc, BasicBlock *newSucc);
-  // 重定向分支槽
-  static bool rewriteBranchSlot(BasicBlock *pred, bool trueEdge,
-                                BasicBlock *newTarget);
-  // 重定向跳转槽
-  static bool rewriteJumpTarget(BasicBlock *pred, BasicBlock *newTarget);
-  // 初始化跳转表目标
-  static void resetJumpTableTargets(Function *function, JumpTable *table,
-                                    u32 count, BasicBlock *fill);
-  // 改写跳转表目标
-  static void rewriteJumpTableTarget(JumpTable *table, u32 index,
-                                     BasicBlock *newTarget);
+
+  // 将终结符及死边元数据折叠为无条件跳转
+  static bool foldTerminatorToJump(Function *function, BasicBlock *pred,
+                                   BasicBlock *kept);
+  // 旁路并删除空跳转块
+  static bool bypassTrivialBlock(Function *function, BasicBlock *middle);
+  // 将单前驱块合入其前驱
+  static bool mergeBlockIntoPredecessor(Function *function, BasicBlock *pred,
+                                        BasicBlock *succ);
 
 private:
+  // 删除死边元数据
+  static void dropIncomingForRemovedEdge(Function *function, BasicBlock *pred,
+                                         BasicBlock *succ);
+  // 追加完整 Phi 边值列
+  static bool addPhiEdgeValues(Function *function, BasicBlock *succ,
+                               BasicBlock *pred,
+                               const std::vector<PhiEdgeValue> &values);
+  // 删除完整 Phi 边值列
+  static bool removePhiEdgeValues(Function *function, BasicBlock *succ,
+                                  BasicBlock *pred);
+  // 迁移完整 Phi 边值列
+  static bool movePhiEdgeValues(Function *function, BasicBlock *succ,
+                                BasicBlock *oldPred, BasicBlock *newPred);
+  // 重定向所有匹配物理槽
+  static bool rewriteSuccessorEdges(BasicBlock *pred, BasicBlock *oldSucc,
+                                    BasicBlock *newSucc);
+  // 将终结符改写为跳转槽
+  static bool rewriteTerminatorToJump(Function *function, BasicBlock *pred,
+                                      BasicBlock *target);
+  // 删除已断开活边的块
+  static void eraseBlock(Function *function, BasicBlock *block);
+  // 改写分支物理槽
+  static bool rewriteBranchSlot(BasicBlock *pred, bool trueEdge,
+                                BasicBlock *newTarget);
+  // 改写跳转物理槽
+  static bool rewriteJumpTarget(BasicBlock *pred, BasicBlock *newTarget);
+  // 一次性重建 Phi 槽
+  static void rebuildPhiIncomingSlots(Function *function, Inst *phi,
+                                      const std::vector<BasicBlock *> &preds,
+                                      const std::vector<Inst *> &values);
   // 追加Phi槽
   static void appendPhiIncomingSlot(Function *function, Inst *phi,
                                     BasicBlock *pred, Inst *value);
@@ -979,21 +1068,29 @@ private:
                                     BasicBlock *pred);
   // 删除前驱槽
   static bool erasePredecessorSlot(BasicBlock *succ, BasicBlock *pred);
+  // 查找前驱下标
+  static u32 findPredecessorIndex(BasicBlock *block, BasicBlock *pred);
+  // 替换前驱数组
+  static void assignPredecessors(Function *function, BasicBlock *block,
+                                 const std::vector<BasicBlock *> &preds);
 
-  friend void computePreds(Function *function);
+  friend bool computePreds(Function *function);
+  friend bool cleanupDeadBlocks(Function *function);
 };
 
 // 重建Use链
 void computeUses(Function *function);
 void replaceAllUsesWith(Function *function, Inst *from, Inst *to);
 std::vector<BasicBlock *> computeRPO(Function *function);
-// 重建前驱数组
-void computePreds(Function *function);
+// 规范化LIR/MIR顶层扁平CFG的前驱和Phi输入
+bool computePreds(Function *function);
+// 删除LIR/MIR顶层扁平CFG中入口不可达的块
+bool cleanupDeadBlocks(Function *function);
 
 template <typename Func>
 inline void forEachPhi(BasicBlock *block, Func &&func) {
-  for (Inst *inst = block ? block->phiFirst : nullptr; inst;) {
-    Inst *next = inst->next;
+  for (Inst *inst = block ? block->firstPhi() : nullptr; inst;) {
+    Inst *next = inst->next();
     func(inst);
     inst = next;
   }
@@ -1001,8 +1098,8 @@ inline void forEachPhi(BasicBlock *block, Func &&func) {
 
 template <typename Func>
 inline void forEachInst(BasicBlock *block, Func &&func) {
-  for (Inst *inst = block ? block->instFirst : nullptr; inst;) {
-    Inst *next = inst->next;
+  for (Inst *inst = block ? block->firstInst() : nullptr; inst;) {
+    Inst *next = inst->next();
     func(inst);
     inst = next;
   }
@@ -1011,6 +1108,23 @@ inline void forEachInst(BasicBlock *block, Func &&func) {
 template <typename Func> inline void forEachOp(BasicBlock *block, Func &&func) {
   forEachPhi(block, func);
   forEachInst(block, func);
+}
+
+template <typename Func>
+inline void forEachInstRecursive(Region *region, Func &&func) {
+  if (!region)
+    return;
+  for (BasicBlock *block = region->first; block; block = block->next()) {
+    forEachOp(block, [&](Inst *inst) {
+      func(inst);
+      if (inst->getOp() == OP_FOR) {
+        forEachInstRecursive(inst->getBody(), func);
+      } else if (inst->getOp() == OP_IF || inst->getOp() == OP_WHILE) {
+        forEachInstRecursive(inst->getScf().r[0], func);
+        forEachInstRecursive(inst->getScf().r[1], func);
+      }
+    });
+  }
 }
 
 template <typename Func>
@@ -1045,21 +1159,23 @@ inline void forEachSuccessor(Inst *terminator, Func &&func) {
     visit(terminator->getBr().falseBB);
   } else if (op == OP_SWITCH) {
     const SwitchPayload &payload = terminator->getSwitch();
-    for (u32 i = 0; i < payload.caseCount; ++i)
-      visit(payload.cases[i].target);
-    visit(payload.defaultTarget);
+    for (u32 i = 0; i < payload.getCaseCount(); ++i)
+      visit(payload.getCase(i).getTarget());
+    visit(payload.getDefaultTarget());
   } else if (op == MOP_JT_DISPATCH) {
     JumpTable *table = terminator->getJumpTable();
-    if (table)
-      for (u32 i = 0; i < table->entryCount; ++i)
+    if (table) {
+      for (u32 i = 0; i < table->getEntryCount(); ++i)
         visit(table->getTarget(i));
+      visit(table->getDefaultTarget());
+    }
   }
 }
 
 template <typename Func>
 inline void forEachSuccessor(BasicBlock *block, Func &&func) {
   if (block)
-    forEachSuccessor(block->instLast, func);
+    forEachSuccessor(block->lastInst(), func);
 }
 
 inline u32 successorCount(BasicBlock *block) {

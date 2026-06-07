@@ -324,10 +324,6 @@ const SwitchPayload &Inst::getSwitch() const noexcept {
   assert(op_ == OP_SWITCH && switch_);
   return *switch_;
 }
-SwitchPayload *Inst::getSwitchPayload() const noexcept {
-  assert(op_ == OP_SWITCH);
-  return switch_;
-}
 JumpTable *Inst::getJumpTable() const noexcept {
   assert(op_ == MOP_LA || op_ == MOP_JT_DISPATCH);
   return op_ == MOP_LA ? symbol_.jumpTable : jumpTable_;
@@ -345,194 +341,256 @@ i32 Inst::getFrameIndex() const noexcept {
   return frameIndex_;
 }
 bool Inst::isPrecoloredDef() const noexcept {
-  return !block && id < 64 && op_ == MOP_NOP;
+  return !block_ && id < 64 && op_ == MOP_NOP;
 }
 
 bool Inst::atFront() const noexcept {
-  return block && (op_ == OP_PHI ? block->phiFirst : block->instFirst) == this;
+  return block_ &&
+         (op_ == OP_PHI ? block_->firstPhi() : block_->firstInst()) == this;
 }
 bool Inst::atBack() const noexcept {
-  return block && (op_ == OP_PHI ? block->phiLast : block->instLast) == this;
+  return block_ &&
+         (op_ == OP_PHI ? block_->lastPhi() : block_->lastInst()) == this;
 }
 Inst *Inst::getParentOp() const noexcept {
-  return block && block->parentRegion ? block->parentRegion->owner : nullptr;
+  return block_ && block_->parentRegion ? block_->parentRegion->owner : nullptr;
 }
 bool Inst::inside(const Inst *outer) const noexcept {
   if (!outer)
     return false;
-  for (const Region *region = block ? block->parentRegion : nullptr; region;
+  for (const Region *region = block_ ? block_->parentRegion : nullptr; region;
        region = region->parent)
     if (region->owner == outer)
       return true;
   return false;
 }
 
-static void unlinkInst(Inst *inst) noexcept {
-  Inst *&first =
-      inst->getOp() == OP_PHI ? inst->block->phiFirst : inst->block->instFirst;
-  Inst *&last =
-      inst->getOp() == OP_PHI ? inst->block->phiLast : inst->block->instLast;
-  if (inst->prev)
-    inst->prev->next = inst->next;
+BasicBlock *Inst::unlinkFromBlock() noexcept {
+  BasicBlock *oldBlock = block_;
+  if (!oldBlock)
+    return nullptr;
+  Inst *&first = op_ == OP_PHI ? oldBlock->phiFirst_ : oldBlock->instFirst_;
+  Inst *&last = op_ == OP_PHI ? oldBlock->phiLast_ : oldBlock->instLast_;
+  if (prev_)
+    prev_->next_ = next_;
   else
-    first = inst->next;
-  if (inst->next)
-    inst->next->prev = inst->prev;
+    first = next_;
+  if (next_)
+    next_->prev_ = prev_;
   else
-    last = inst->prev;
+    last = prev_;
+  prev_ = next_ = nullptr;
+  block_ = nullptr;
+  return oldBlock;
+}
+
+void Inst::linkBefore(Inst *anchor) noexcept {
+  assert(anchor && anchor->block_ && !block_ && !prev_ && !next_ &&
+         (op_ == OP_PHI) == (anchor->op_ == OP_PHI));
+  block_ = anchor->block_;
+  prev_ = anchor->prev_;
+  next_ = anchor;
+  if (prev_)
+    prev_->next_ = this;
+  else if (op_ == OP_PHI)
+    block_->phiFirst_ = this;
+  else
+    block_->instFirst_ = this;
+  anchor->prev_ = this;
+}
+
+void Inst::linkAfter(Inst *anchor) noexcept {
+  assert(anchor && anchor->block_ && !block_ && !prev_ && !next_ &&
+         (op_ == OP_PHI) == (anchor->op_ == OP_PHI));
+  block_ = anchor->block_;
+  prev_ = anchor;
+  next_ = anchor->next_;
+  if (next_)
+    next_->prev_ = this;
+  else if (op_ == OP_PHI)
+    block_->phiLast_ = this;
+  else
+    block_->instLast_ = this;
+  anchor->next_ = this;
 }
 
 void Inst::moveBefore(Inst *anchor) noexcept {
-  assert(anchor && anchor->block && block && op_ != OP_PHI &&
-         anchor->getOp() != OP_PHI);
+  assert(anchor && anchor->block_ && block_ && op_ != OP_PHI &&
+         anchor->getOp() != OP_PHI && !isTerminator(op_) &&
+         !isTerminator(anchor->getOp()));
   if (anchor == this)
     return;
-  unlinkInst(this);
-  block = anchor->block;
-  prev = anchor->prev;
-  next = anchor;
-  if (prev)
-    prev->next = this;
-  else
-    block->instFirst = this;
-  anchor->prev = this;
+  unlinkFromBlock();
+  linkBefore(anchor);
 }
 
 void Inst::moveAfter(Inst *anchor) noexcept {
-  assert(anchor && anchor->block && block && op_ != OP_PHI &&
-         anchor->getOp() != OP_PHI);
+  assert(anchor && anchor->block_ && block_ && op_ != OP_PHI &&
+         anchor->getOp() != OP_PHI && !isTerminator(op_) &&
+         !isTerminator(anchor->getOp()));
   if (anchor == this)
     return;
-  unlinkInst(this);
-  block = anchor->block;
-  prev = anchor;
-  next = anchor->next;
-  if (next)
-    next->prev = this;
-  else
-    block->instLast = this;
-  anchor->next = this;
+  unlinkFromBlock();
+  linkAfter(anchor);
 }
 
 BasicBlock *BasicBlock::getPredecessor(u32 index) const noexcept {
   assert(index < predecessorCount_);
   return predecessors_[index];
 }
-bool BasicBlock::empty() const noexcept { return !phiFirst && !instFirst; }
+bool BasicBlock::empty() const noexcept { return !phiFirst_ && !instFirst_; }
 bool BasicBlock::endsWithTerminator() const noexcept {
-  return instLast && isTerminator(instLast->getOp());
+  return instLast_ && isTerminator(instLast_->getOp());
 }
 Inst *BasicBlock::terminator() const noexcept {
   assert(endsWithTerminator());
-  return instLast;
+  return instLast_;
 }
 
-void BasicBlock::erase() noexcept {
-  if (!parentRegion)
-    return;
-  if (prev)
-    prev->next = next;
+Region *BasicBlock::unlinkFromRegion() noexcept {
+  Region *oldRegion = parentRegion;
+  if (!oldRegion)
+    return nullptr;
+  if (prev_)
+    prev_->next_ = next_;
   else
-    parentRegion->first = next;
-  if (next)
-    next->prev = prev;
+    parentRegion->first = next_;
+  if (next_)
+    next_->prev_ = prev_;
   else
-    parentRegion->last = prev;
-  prev = next = nullptr;
+    parentRegion->last = prev_;
+  prev_ = next_ = nullptr;
   parentRegion = nullptr;
+  return oldRegion;
+}
+void BasicBlock::linkBefore(BasicBlock *anchor) noexcept {
+  assert(anchor && anchor->parentRegion && !parentRegion && !prev_ && !next_);
+  parentRegion = anchor->parentRegion;
+  prev_ = anchor->prev_;
+  next_ = anchor;
+  if (prev_)
+    prev_->next_ = this;
+  else
+    parentRegion->first = this;
+  anchor->prev_ = this;
+}
+void BasicBlock::linkAfter(BasicBlock *anchor) noexcept {
+  assert(anchor && anchor->parentRegion && !parentRegion && !prev_ && !next_);
+  parentRegion = anchor->parentRegion;
+  prev_ = anchor;
+  next_ = anchor->next_;
+  if (next_)
+    next_->prev_ = this;
+  else
+    parentRegion->last = this;
+  anchor->next_ = this;
 }
 void BasicBlock::moveBefore(BasicBlock *anchor) noexcept {
   assert(anchor && anchor->parentRegion);
   if (anchor == this)
     return;
-  erase();
-  parentRegion = anchor->parentRegion;
-  prev = anchor->prev;
-  next = anchor;
-  if (prev)
-    prev->next = this;
-  else
-    parentRegion->first = this;
-  anchor->prev = this;
+  unlinkFromRegion();
+  linkBefore(anchor);
 }
 void BasicBlock::moveAfter(BasicBlock *anchor) noexcept {
   assert(anchor && anchor->parentRegion);
   if (anchor == this)
     return;
-  erase();
-  parentRegion = anchor->parentRegion;
-  prev = anchor;
-  next = anchor->next;
-  if (next)
-    next->prev = this;
-  else
-    parentRegion->last = this;
-  anchor->next = this;
+  unlinkFromRegion();
+  linkAfter(anchor);
 }
+
 void BasicBlock::moveToStart(Region *region) noexcept {
   assert(region);
-  erase();
+  unlinkFromRegion();
+  if (region->first) {
+    linkBefore(region->first);
+    return;
+  }
   parentRegion = region;
-  prev = nullptr;
-  next = region->first;
-  if (next)
-    next->prev = this;
-  else
-    region->last = this;
-  region->first = this;
+  region->first = region->last = this;
 }
 void BasicBlock::moveToEnd(Region *region) noexcept {
   assert(region);
-  erase();
+  unlinkFromRegion();
+  if (region->last) {
+    linkAfter(region->last);
+    return;
+  }
   parentRegion = region;
-  next = nullptr;
-  prev = region->last;
-  if (prev)
-    prev->next = this;
-  else
-    region->first = this;
-  region->last = this;
+  region->first = region->last = this;
 }
+
+void BasicBlock::takeInstructionSuffixAfter(Inst *anchor) {
+  assert(anchor && anchor->block_ && empty());
+  BasicBlock *source = anchor->block_;
+  Inst *first = anchor->next_;
+  if (!first)
+    return;
+  instFirst_ = first;
+  instLast_ = source->instLast_;
+  source->instLast_ = anchor;
+  anchor->next_ = nullptr;
+  first->prev_ = nullptr;
+  for (Inst *inst = first; inst; inst = inst->next_)
+    inst->block_ = this;
+}
+
+void BasicBlock::takeSingleBlockRegion(Region *source) {
+  assert(source && empty());
+  BasicBlock *first = source->first;
+  if (!first)
+    return;
+  assert(first == source->last && "structured HIR region must be single-block");
+  phiFirst_ = first->phiFirst_;
+  phiLast_ = first->phiLast_;
+  instFirst_ = first->instFirst_;
+  instLast_ = first->instLast_;
+  forEachOp(first, [&](Inst *inst) { inst->block_ = this; });
+  first->phiFirst_ = first->phiLast_ = nullptr;
+  first->instFirst_ = first->instLast_ = nullptr;
+  first->unlinkFromRegion();
+  source->first = source->last = nullptr;
+  source->owner = nullptr;
+  source->parent = nullptr;
+}
+
 bool BasicBlock::atFront() const noexcept {
   return parentRegion && parentRegion->first == this;
 }
+
 bool BasicBlock::atBack() const noexcept {
   return parentRegion && parentRegion->last == this;
 }
 
-void BasicBlock::inlineBefore(Inst *anchor) noexcept {
-  assert(anchor && anchor->block && anchor->getOp() != OP_PHI && !phiFirst);
-  if (!instFirst) {
-    erase();
+void BasicBlock::spliceIntoBefore(Inst *anchor) noexcept {
+  assert(anchor && anchor->block_ && anchor->block_ != this &&
+         anchor->getOp() != OP_PHI && !phiFirst_);
+  if (!instFirst_) {
+    unlinkFromRegion();
     return;
   }
-  BasicBlock *destination = anchor->block;
-  for (Inst *inst = instFirst; inst; inst = inst->next)
-    inst->block = destination;
-  instFirst->prev = anchor->prev;
-  instLast->next = anchor;
-  if (anchor->prev)
-    anchor->prev->next = instFirst;
+  BasicBlock *destination = anchor->block_;
+  for (Inst *inst = instFirst_; inst; inst = inst->next_)
+    inst->block_ = destination;
+  instFirst_->prev_ = anchor->prev_;
+  instLast_->next_ = anchor;
+  if (anchor->prev_)
+    anchor->prev_->next_ = instFirst_;
   else
-    destination->instFirst = instFirst;
-  anchor->prev = instLast;
-  instFirst = instLast = nullptr;
-  erase();
+    destination->instFirst_ = instFirst_;
+  anchor->prev_ = instLast_;
+  instFirst_ = instLast_ = nullptr;
+  unlinkFromRegion();
 }
 
 void Region::spliceBlocks(Region *source) noexcept {
-  if (!source || !source->first)
+  if (!source || source == this)
     return;
-  for (BasicBlock *block = source->first; block; block = block->next)
-    block->parentRegion = this;
-  if (last) {
-    last->next = source->first;
-    source->first->prev = last;
-  } else
-    first = source->first;
-  last = source->last;
-  source->first = source->last = nullptr;
+  while (source->first)
+    source->first->moveToEnd(this);
 }
+
 void Region::adoptBlock(BasicBlock *block) noexcept {
   assert(block);
   block->moveToEnd(this);
@@ -544,6 +602,25 @@ JumpTable *Function::newJumpTable() {
   jumpTableHead = table;
   return table;
 }
+
+void JumpTable::configure(Function *function, i32 newMinValue,
+                          BasicBlock *newDefaultTarget,
+                          BasicBlock *newBoundsCheckBlock,
+                          BasicBlock *newTableLookupBlock,
+                          BasicBlock *const *targets, u32 count) {
+  assert(function && function->arena && newDefaultTarget &&
+         (count == 0 || targets));
+  minValue = newMinValue;
+  defaultTarget_ = newDefaultTarget;
+  boundsCheckBlock = newBoundsCheckBlock;
+  tableLookupBlock = newTableLookupBlock;
+  resetTargets(function->arena, count, newDefaultTarget);
+  for (u32 index = 0; index < count; ++index) {
+    assert(targets[index]);
+    setTarget(index, targets[index]);
+  }
+}
+
 i32 Function::newFrameSlot(i32 size, i32 alignment, FrameSlot::Kind kind) {
   assert(size >= 0 && alignment > 0 && (alignment & (alignment - 1)) == 0);
   frameSlots.push_back({size, alignment, 0, kind});
@@ -554,6 +631,7 @@ Inst *Module::physicalRegister(u32 reg) const noexcept {
   assert(reg < 64);
   return physicalRegisterDefs[reg];
 }
+
 void Module::initPregDefs() {
   for (u32 reg = 0; reg < 64; ++reg) {
     Inst *inst = arena->create<Inst>();
@@ -564,6 +642,7 @@ void Module::initPregDefs() {
     physicalRegisterDefs[reg] = inst;
   }
 }
+
 Module *Module::create(Arena &storage) {
   Module *module = storage.create<Module>();
   module->arena = &storage;
