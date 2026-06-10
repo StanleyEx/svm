@@ -162,7 +162,7 @@ public:
   ArrayType *getArrayType(Type *elementType, const i32 *dims,
                           u32 dimCount) noexcept {
     assert(isScalarType(elementType));
-    assert(dimCount > 0);
+    assert(dims && dimCount > 0);
 
     ArrayKey key{elementType, dims, dimCount};
 
@@ -174,7 +174,7 @@ public:
     std::memcpy(storedDims, dims, sizeof(i32) * dimCount);
     ArrayType *arrayType =
         arena_.create<ArrayType>(elementType, storedDims, dimCount);
-    arrayMap_.insert({key, arrayType});
+    arrayMap_.insert({ArrayKey{elementType, storedDims, dimCount}, arrayType});
 
     return arrayType;
   }
@@ -210,7 +210,7 @@ public:
 
   FunctionType *getFunctionType(Type *returnType, Type **paramTypes,
                                 u32 paramCount, bool isVariadic) noexcept {
-    assert(returnType);
+    assert(returnType && (paramCount == 0 || paramTypes));
 
     FuncKey key{returnType, paramTypes, paramCount, isVariadic};
 
@@ -220,10 +220,13 @@ public:
 
     Type **storedParamTypes =
         arena_.createArray<Type *>(paramCount ? paramCount : 1);
-    std::memcpy(storedParamTypes, paramTypes, sizeof(Type *) * paramCount);
+    if (paramCount > 0)
+      std::memcpy(storedParamTypes, paramTypes, sizeof(Type *) * paramCount);
     FunctionType *funcType = arena_.create<FunctionType>(
         returnType, storedParamTypes, paramCount, isVariadic);
-    funcMap_.insert({key, funcType});
+    funcMap_.insert(
+        {FuncKey{returnType, storedParamTypes, paramCount, isVariadic},
+         funcType});
 
     return funcType;
   }
@@ -241,7 +244,8 @@ private:
 
     bool operator==(const ArrayKey &other) const noexcept {
       return elementType == other.elementType && dimCount == other.dimCount &&
-             std::memcmp(dims, other.dims, sizeof(i32) * dimCount) == 0;
+             (dimCount == 0 ||
+              std::memcmp(dims, other.dims, sizeof(i32) * dimCount) == 0);
     }
   };
 
@@ -264,8 +268,8 @@ private:
     bool operator==(const FuncKey &other) const noexcept {
       return returnType == other.returnType && paramCount == other.paramCount &&
              isVariadic == other.isVariadic &&
-             std::memcmp(paramTypes, other.paramTypes,
-                         sizeof(Type *) * paramCount) == 0;
+             (paramCount == 0 || std::memcmp(paramTypes, other.paramTypes,
+                                             sizeof(Type *) * paramCount) == 0);
     }
   };
 

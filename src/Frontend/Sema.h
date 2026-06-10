@@ -33,7 +33,7 @@ public:
     totalEmitted_++;
   }
 
-  void fillZero(u32 count) {
+  void fillZero(u64 count) {
     zeroRun_ += count;
     totalEmitted_ += count;
   }
@@ -68,6 +68,7 @@ public:
         break;
       }
     }
+    totalEmitted_ = newSize;
   }
 
   InitSegment *finalize(u64 &segmentCount) {
@@ -85,14 +86,14 @@ private:
   Arena &arena_;
   std::vector<InitSegment> segments_;
   std::vector<ExprNode *> pending_;
-  u32 zeroRun_ = 0;
+  u64 zeroRun_ = 0;
   u64 totalEmitted_ = 0;
 
   void flushZeros() {
     if (zeroRun_ == 0)
       return;
     if (zeroRun_ < ZERO_RUN_LIMIT) {
-      for (u32 i = 0; i < zeroRun_; ++i)
+      for (u64 i = 0; i < zeroRun_; ++i)
         pending_.push_back(nullptr);
     } else {
       flushPending();
@@ -171,6 +172,9 @@ private:
 
   // 分析声明
   void checkDecl(DeclNode *decl, bool isGlobal);
+  ExprNode *checkInitExpr(InitExpr *initExpr, Type *baseType, bool needEval);
+  void processScalarInit(InitNode *init, Type *baseType, bool needEval,
+                         InitSegmentBuilder &initSegBuilder);
   void processInitList(InitList *initList, Type *baseType, const i32 *dims,
                        u32 dimCount, bool needEval,
                        InitSegmentBuilder &initSegBuilder);

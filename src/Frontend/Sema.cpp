@@ -5,6 +5,7 @@
 #include "Type.h"
 #include "Utils.h"
 #include <cstring>
+#include <limits>
 
 namespace svm {
 void Sema::run(CompUnit *compUnit) {
@@ -39,7 +40,7 @@ void Sema::run(CompUnit *compUnit) {
     Type **paramTypes = arena_.createArray<Type *>(paramCount);
 
     for (usize i = 0; i < paramCount; i++) {
-      TypeKind typeKind;
+      TypeKind typeKind = TypeKind::Int;
       bool isArray = false;
       switch (proto.paramTypes[i]) {
       case 'i':
@@ -61,8 +62,8 @@ void Sema::run(CompUnit *compUnit) {
       default:
         assert(false && "Invalid runtime proto");
       }
-      char nameBuf[16];
-      std::snprintf(nameBuf, sizeof(nameBuf), "_arg%zu", i);
+      char nameBuf[32];
+      std::snprintf(nameBuf, sizeof(nameBuf), "_arg%u", static_cast<u32>(i));
       auto pname = arena_.duplicateString(nameBuf);
       params[i] = arena_.create<FuncParam>(nowhereLoc, pname, typeKind, isArray,
                                            nullptr, 0);
@@ -156,9 +157,17 @@ void Sema::collectGlobals(CompUnit *compUnit) {
           SVM_ERROR(diagEngine_, funcDecl->getLocation(),
                     "Conflicting declaration of function '%s'.",
                     funcDecl->name);
-        } else if (!oldFuncDecl->body && funcDecl->body) {
+        } else {
+          funcDecl->type = oldFuncDecl->type;
+          for (u32 index = 0; index < funcDecl->paramCount; ++index)
+            funcDecl->params[index]->type =
+                oldFuncDecl->type->paramTypes[index];
+        }
+        if (sameSignature(oldFuncDecl, funcDecl) && !oldFuncDecl->body &&
+            funcDecl->body) {
           registerFuncBody(funcDecl);
-        } else if (oldFuncDecl->body && funcDecl->body) {
+        } else if (sameSignature(oldFuncDecl, funcDecl) && oldFuncDecl->body &&
+                   funcDecl->body) {
           SVM_ERROR(diagEngine_, funcDecl->getLocation(),
                     "Redefinition of function '%s'.", funcDecl->name);
         }
@@ -188,10 +197,7 @@ void Sema::processTopLevelDecls(CompUnit *compUnit) {
       break;
     }
     case ASTKind::ConstDecl: {
-      auto constDecl = cast<ConstDecl>(decl);
-      constDecl->isGlobal = true;
-      checkDecl(constDecl, true);
-      declareGlobal(constDecl->name, constDecl);
+      // 在collectGlobals()中处理
       break;
     }
     case ASTKind::FuncDecl: {
@@ -255,13 +261,22 @@ void Sema::checkDecl(DeclNode *decl, bool isGlobal) {
       evaledDims[i] = evalDimExpr(dims[i]);
   }
   auto baseType = getScalarType(baseTypeKind);
+
+  u32 totalElems = 1;
+  for (u32 i = 0; i < dimCount; i++) {
+    const u64 product =
+        static_cast<u64>(totalElems) * static_cast<u64>(evaledDims[i]);
+    if (product > std::numeric_limits<u32>::max()) {
+      SVM_ERROR(diagEngine_, location, "Array '%s' has too many elements.",
+                name);
+      evaledDims[i] = 1;
+      continue;
+    }
+    totalElems = static_cast<u32>(product);
+  }
   auto declType = dimCount == 0
                       ? baseType
                       : typeCtx_.getArrayType(baseType, evaledDims, dimCount);
-
-  u32 totalElems = 1;
-  for (u32 i = 0; i < dimCount; i++)
-    totalElems *= evaledDims[i];
 
   InitSegmentBuilder initSegBuilder(arena_);
   bool needEval = isConst || isGlobal;
@@ -273,49 +288,12 @@ void Sema::checkDecl(DeclNode *decl, bool isGlobal) {
                   "Array initializer must be an initializer list.");
         initSegBuilder.fillZero(totalElems);
       } else {
-        auto value = checkExpr(initExpr->expr);
-        initExpr->expr = coerceTo(value, baseType);
-        if (needEval) {
-          ConstValue constValue;
-          if (eval(value, constValue))
-            value = makeLiteralFromConst(value->getLocation(), baseType,
-                                         constValue);
-          else
-            SVM_ERROR(diagEngine_, value->getLocation(),
-                      "Initializer must be a constant "
-                      "expression.");
-        }
-        initSegBuilder.add(value);
+        initSegBuilder.add(checkInitExpr(initExpr, baseType, needEval));
       }
     } else if (auto initList = dyn_cast<InitList>(init)) { // = { ... }
-      if (dimCount == 0) {                                 // 标量初始化 { n }
-        if (initList->initCount == 0)                      // 空花括号 {}
-          initSegBuilder.fillZero(1);
-        else if (initList->initCount == 1) {
-          if (auto initExprInner = dyn_cast<InitExpr>(initList->inits[0])) {
-            auto value = checkExpr(initExprInner->expr);
-            initExprInner->expr = coerceTo(value, baseType);
-            if (needEval) {
-              ConstValue constValue;
-              if (eval(value, constValue))
-                value = makeLiteralFromConst(value->getLocation(), baseType,
-                                             constValue);
-              else
-                SVM_ERROR(diagEngine_, value->getLocation(),
-                          "Initializer must be a constant expression.");
-            }
-            initSegBuilder.add(value);
-          } else {
-            SVM_ERROR(diagEngine_, initList->getLocation(),
-                      "Initializer must be an expression.");
-            initSegBuilder.fillZero(1);
-          }
-        } else {
-          SVM_ERROR(diagEngine_, initList->getLocation(),
-                    "Scalar initializer has too many elements.");
-          initSegBuilder.fillZero(1);
-        }
-      } else {
+      if (dimCount == 0)
+        processScalarInit(initList, baseType, needEval, initSegBuilder);
+      else {
         processInitList(initList, baseType, evaledDims, dimCount, needEval,
                         initSegBuilder);
         initSegBuilder.resize(totalElems);
@@ -345,57 +323,92 @@ void Sema::checkDecl(DeclNode *decl, bool isGlobal) {
   }
 }
 
+ExprNode *Sema::checkInitExpr(InitExpr *initExpr, Type *baseType,
+                              bool needEval) {
+  if (!initExpr || !initExpr->expr)
+    return nullptr;
+  ExprNode *value = checkExpr(initExpr->expr);
+  initExpr->expr = coerceTo(value, baseType);
+  value = initExpr->expr;
+  if (!needEval || !value)
+    return value;
+
+  ConstValue constValue;
+  if (eval(value, constValue))
+    return makeLiteralFromConst(value->getLocation(), baseType, constValue);
+  SVM_ERROR(diagEngine_, value->getLocation(),
+            "Initializer must be a constant expression.");
+  return nullptr;
+}
+
+void Sema::processScalarInit(InitNode *init, Type *baseType, bool needEval,
+                             InitSegmentBuilder &initSegBuilder) {
+  if (auto *initExpr = dyn_cast<InitExpr>(init)) {
+    initSegBuilder.add(checkInitExpr(initExpr, baseType, needEval));
+    return;
+  }
+
+  auto *initList = dyn_cast<InitList>(init);
+  if (!initList) {
+    initSegBuilder.fillZero(1);
+    return;
+  }
+
+  const u64 start = initSegBuilder.size();
+  for (u32 index = 0; index < initList->initCount; ++index) {
+    if (initList->inits[index])
+      processScalarInit(initList->inits[index], baseType, needEval,
+                        initSegBuilder);
+  }
+  const u64 initialized = initSegBuilder.size() - start;
+  if (initialized == 0)
+    initSegBuilder.fillZero(1);
+  else if (initialized > 1) {
+    SVM_ERROR(diagEngine_, initList->getLocation(),
+              "Scalar initializer has too many elements.");
+    initSegBuilder.resize(start + 1);
+  }
+}
+
 void Sema::processInitList(InitList *initList, Type *baseType, const i32 *dims,
                            u32 dimCount, bool needEval,
                            InitSegmentBuilder &initSegBuilder) {
-  u32 elemSize = 1;
-  for (u32 i = 1; i < dimCount; i++)
-    elemSize *= dims[i];
-  u32 expectedElems = dims[0] * elemSize;
+  assert(initList && baseType && dims && dimCount > 0);
 
-  usize start = initSegBuilder.size();
-  u32 initCountSubBlock = 0;
+  u64 subobjectSize = 1;
+  for (u32 i = 1; i < dimCount; i++)
+    subobjectSize *= static_cast<u64>(dims[i]);
+  const u64 expectedElems = static_cast<u64>(dims[0]) * subobjectSize;
+
+  const u64 start = initSegBuilder.size();
 
   for (u32 i = 0; i < initList->initCount; i++) {
-    auto item = initList->inits[i];
+    InitNode *item = initList->inits[i];
     if (!item)
       continue;
 
     if (auto initExpr = dyn_cast<InitExpr>(item)) {
-      auto value = checkExpr(initExpr->expr);
-      initExpr->expr = coerceTo(value, baseType);
-      if (needEval) {
-        ConstValue constValue;
-        if (eval(value, constValue))
-          value =
-              makeLiteralFromConst(value->getLocation(), baseType, constValue);
-        else
-          SVM_ERROR(diagEngine_, value->getLocation(),
-                    "Initializer must be a constant expression.");
-      }
-      initSegBuilder.add(value);
-      ++initCountSubBlock;
-      if (initCountSubBlock == expectedElems)
-        initCountSubBlock = 0;
+      initSegBuilder.add(checkInitExpr(initExpr, baseType, needEval));
     } else if (auto initListInner = dyn_cast<InitList>(item)) {
-      if (initCountSubBlock != 0) {
-        u32 padding = expectedElems - initCountSubBlock;
-        initSegBuilder.fillZero(padding);
-        initCountSubBlock = 0;
-      }
-      if (dimCount <= 1)
-        SVM_ERROR(diagEngine_, initListInner->getLocation(),
-                  "Too many braces in initializer list.");
-      else
+      const u64 initialized = initSegBuilder.size() - start;
+      if (dimCount > 1) {
+        const u64 offset = initialized % subobjectSize;
+        if (offset != 0)
+          initSegBuilder.fillZero(subobjectSize - offset);
         processInitList(initListInner, baseType, dims + 1, dimCount - 1,
                         needEval, initSegBuilder);
+        continue;
+      }
+
+      processScalarInit(initListInner, baseType, needEval, initSegBuilder);
     }
   }
-  usize actualSegments = initSegBuilder.size() - start;
+  const u64 actualSegments = initSegBuilder.size() - start;
   if (actualSegments > expectedElems) {
     SVM_WARN(diagEngine_, initList->getLocation(),
              "Too many elements in initializer list. (%llu, got %llu)",
-             actualSegments, expectedElems);
+             static_cast<unsigned long long>(expectedElems),
+             static_cast<unsigned long long>(actualSegments));
     initSegBuilder.resize(start + expectedElems);
   } else if (actualSegments < expectedElems)
     initSegBuilder.fillZero(expectedElems - actualSegments);
@@ -456,9 +469,9 @@ i32 Sema::evalDimExpr(ExprNode *expr) {
     return 1;
   }
   i32 value = constValue.asInt();
-  if (value < 0) {
+  if (value <= 0) {
     SVM_ERROR(diagEngine_, expr->getLocation(),
-              "Array dimension must be non-negative.");
+              "Array dimension must be positive.");
     return 1;
   }
   return value;
