@@ -316,6 +316,46 @@ BasicBlock *Inst::getJumpTarget() const noexcept {
   assert(op_ == OP_JMP || op_ == MOP_J);
   return jumpTarget_;
 }
+u32 Inst::getSuccessorSlotCount() const noexcept {
+  if (op_ == OP_JMP || op_ == MOP_J)
+    return 1;
+  if (op_ == OP_BR || isMachineBranch(op_))
+    return 2;
+  if (op_ == OP_SWITCH)
+    return switch_ ? switch_->caseCount_ + 1 : 0;
+  if (op_ == MOP_JT_DISPATCH)
+    return jumpTable_ ? jumpTable_->entryCount_ + 1 : 0;
+  return 0;
+}
+BasicBlock *Inst::getSuccessorSlot(u32 index) const noexcept {
+  assert(index < getSuccessorSlotCount());
+  if (op_ == OP_JMP || op_ == MOP_J)
+    return jumpTarget_;
+  if (op_ == OP_BR || isMachineBranch(op_))
+    return index ? branch_->falseBB : branch_->trueBB;
+  if (op_ == OP_SWITCH)
+    return index < switch_->caseCount_ ? switch_->cases_[index].target_
+                                       : switch_->defaultTarget_;
+  return index < jumpTable_->entryCount_ ? jumpTable_->target_[index]
+                                         : jumpTable_->defaultTarget_;
+}
+void Inst::setSuccessorSlot(u32 index, BasicBlock *target) noexcept {
+  assert(index < getSuccessorSlotCount());
+  if (op_ == OP_JMP || op_ == MOP_J) {
+    jumpTarget_ = target;
+  } else if (op_ == OP_BR || isMachineBranch(op_)) {
+    (index ? branch_->falseBB : branch_->trueBB) = target;
+  } else if (op_ == OP_SWITCH) {
+    if (index < switch_->caseCount_)
+      switch_->cases_[index].target_ = target;
+    else
+      switch_->defaultTarget_ = target;
+  } else if (index < jumpTable_->entryCount_) {
+    jumpTable_->target_[index] = target;
+  } else {
+    jumpTable_->defaultTarget_ = target;
+  }
+}
 Region *Inst::getBody() const noexcept {
   assert(op_ == OP_FOR);
   return body_;
@@ -363,6 +403,47 @@ bool Inst::inside(const Inst *outer) const noexcept {
     if (region->owner == outer)
       return true;
   return false;
+}
+
+const Inst *getEnclosingLoop(const Inst *inst) noexcept {
+  for (const Region *region = inst && inst->parentBlock()
+                                  ? inst->parentBlock()->parentRegion
+                                  : nullptr;
+       region; region = region->parent)
+    if (region->owner && isLoopOp(region->owner->getOp()))
+      return region->owner;
+  return nullptr;
+}
+
+Inst *getEnclosingLoop(Inst *inst) noexcept {
+  return const_cast<Inst *>(getEnclosingLoop(static_cast<const Inst *>(inst)));
+}
+
+// 逐层找内存基址 返回底层的Alloca, GetGlobal或Param基址
+const Inst *getMemoryBase(const Inst *address) noexcept {
+  while (address) {
+    if (address->getType() != TY_PTR)
+      return nullptr;
+    switch (address->getOp()) {
+    case OP_ALLOCA:
+    case OP_GETGLOBAL:
+    case OP_PARAM:
+      return address; // 成功触达物理基址边界
+    case OP_GETPTR:
+    case OP_ARRAYIDX:
+      if (address->getOperandCount() == 0)
+        return nullptr;
+      address = address->getArg(0); // 穿透数组和指针偏移 用基址递归
+      break;
+    default:
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+Inst *getMemoryBase(Inst *address) noexcept {
+  return const_cast<Inst *>(getMemoryBase(static_cast<const Inst *>(address)));
 }
 
 BasicBlock *Inst::unlinkFromBlock() noexcept {
@@ -521,19 +602,28 @@ void BasicBlock::moveToEnd(Region *region) noexcept {
   region->first = region->last = this;
 }
 
-void BasicBlock::takeInstructionSuffixAfter(Inst *anchor) {
-  assert(anchor && anchor->block_ && empty());
-  BasicBlock *source = anchor->block_;
-  Inst *first = anchor->next_;
-  if (!first)
-    return;
+void BasicBlock::takeInstructionSuffixFrom(Inst *first) {
+  assert(first && first->block_ && first->op_ != OP_PHI && empty());
+  BasicBlock *source = first->block_;
+  Inst *previous = first->prev_;
   instFirst_ = first;
   instLast_ = source->instLast_;
-  source->instLast_ = anchor;
-  anchor->next_ = nullptr;
+  if (previous) {
+    previous->next_ = nullptr;
+    source->instLast_ = previous;
+  } else {
+    source->instFirst_ = nullptr;
+    source->instLast_ = nullptr;
+  }
   first->prev_ = nullptr;
   for (Inst *inst = first; inst; inst = inst->next_)
     inst->block_ = this;
+}
+
+void BasicBlock::takeInstructionSuffixAfter(Inst *anchor) {
+  assert(anchor && anchor->block_ && anchor->op_ != OP_PHI && empty());
+  if (Inst *first = anchor->next_)
+    takeInstructionSuffixFrom(first);
 }
 
 void BasicBlock::takeSingleBlockRegion(Region *source) {

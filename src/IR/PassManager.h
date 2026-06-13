@@ -1,6 +1,7 @@
 #ifndef PASS_MANAGER_H
 #define PASS_MANAGER_H
 
+#include "DiagnosticEngine.h"
 #include "IR.h"
 
 #include <chrono>
@@ -166,6 +167,9 @@ public:
   void linkFunctionAnalyses(AnalysisManager<Function> *analyses) noexcept {
     functionAnalyses_ = analyses;
   }
+  void linkDiagnostics(DiagnosticEngine *diagnostics) noexcept {
+    diagnostics_ = diagnostics;
+  }
 
   AnalysisManager<Module> *moduleAnalyses() const noexcept {
     return moduleAnalyses_;
@@ -184,7 +188,9 @@ public:
     const AnalysisKey *key = Analysis::ID();
     for (const InProgress &entry : building_) {
       if (entry.unit == unit && entry.key == key) {
-        std::fprintf(stderr, "[AnalysisManager] cyclic analysis dependency\n");
+        if (diagnostics_)
+          SVM_FATAL(*diagnostics_, SourceLocation{},
+                    "AnalysisManager检测到循环分析依赖.");
         std::abort();
       }
     }
@@ -236,6 +242,7 @@ private:
   std::vector<InProgress> building_;                  // 分析递归构建栈
   AnalysisManager<Module> *moduleAnalyses_ = nullptr; // 跨层模块分析
   AnalysisManager<Function> *functionAnalyses_ = nullptr; // 跨层函数分析
+  DiagnosticEngine *diagnostics_ = nullptr;
 };
 
 using ModuleAnalysisManager = AnalysisManager<Module>;
@@ -258,6 +265,9 @@ public:
   }
   const PassOptions &options() const noexcept { return options_; }
   FILE *output() const noexcept { return output_; }
+  DiagnosticEngine *diagnostics() const noexcept {
+    return module_ ? module_->diagnostics : nullptr;
+  }
 
   template <typename Analysis> typename Analysis::Result &get(Module *module) {
     return moduleAnalyses_.getResult<Analysis>(module);
@@ -420,7 +430,8 @@ class PassManager {
 public:
   using PrintHook = void (*)(Module *, const char *);
 
-  PassManager() {
+  explicit PassManager(DiagnosticEngine *diagnostics = nullptr)
+      : diagnostics_(diagnostics) {
     functionAnalyses_.linkModuleAnalyses(&moduleAnalyses_);
     moduleAnalyses_.linkFunctionAnalyses(&functionAnalyses_);
   }
@@ -444,11 +455,9 @@ public:
 
   void addPass(std::string_view name) {
     const PassDescriptor *descriptor = PassRegistry::lookup(name);
-    if (!descriptor) {
-      std::fprintf(stderr, "[PassManager] fatal: unknown pass: '%.*s'\n",
-                   static_cast<int>(name.size()), name.data());
-      std::abort();
-    }
+    if (!descriptor)
+      fatal("PassManager找不到名为'%.*s'的Pass.", static_cast<int>(name.size()),
+            name.data());
     if (descriptor->kind == PassKind::Module)
       addPass(PassRegistry::createModule(name, options_));
     else
@@ -458,6 +467,12 @@ public:
   bool run(Module *module) {
     if (!module)
       return false;
+    if (!diagnostics_)
+      diagnostics_ = module->diagnostics;
+    else if (!module->diagnostics)
+      module->diagnostics = diagnostics_;
+    moduleAnalyses_.linkDiagnostics(diagnostics_);
+    functionAnalyses_.linkDiagnostics(diagnostics_);
     context_ = std::make_unique<PassContext>(
         module, moduleAnalyses_, functionAnalyses_, options_, output_);
     Instrumentation instrumentation(options_);
@@ -486,10 +501,8 @@ public:
   void setOutput(FILE *output) noexcept { output_ = output ? output : stdout; }
   bool halted() const noexcept { return halted_; }
   PassContext &context() {
-    if (!context_) {
-      std::fprintf(stderr, "[PassManager] context requested before run\n");
-      std::abort();
-    }
+    if (!context_)
+      fatal("PassManager在run之前请求了PassContext.");
     return *context_;
   }
   ModuleAnalysisManager &moduleAnalyses() noexcept { return moduleAnalyses_; }
@@ -536,17 +549,21 @@ private:
 
   using Clock = std::chrono::steady_clock;
 
-  template <typename Pass> static std::string validatedName(const Pass *pass) {
-    if (!pass) {
-      std::fprintf(stderr, "[PassManager] cannot add a null pass\n");
-      std::abort();
-    }
+  template <typename Pass> std::string validatedName(const Pass *pass) {
+    if (!pass)
+      fatal("PassManager不能添加空Pass.");
     const std::string_view name = pass->name();
-    if (name.empty()) {
-      std::fprintf(stderr, "[PassManager] cannot add an unnamed pass\n");
-      std::abort();
-    }
+    if (name.empty())
+      fatal("PassManager不能添加无名Pass.");
     return std::string(name);
+  }
+
+  template <typename... Args>
+  [[noreturn]] void fatal(const char *format, Args... args) const {
+    if (diagnostics_)
+      diagnostics_->diagEmit(DiagnosticLevel::Fatal, SourceLocation{}, __FILE__,
+                             __func__, __LINE__, format, args...);
+    std::abort();
   }
 
   void maybePrint(Module *module, std::string_view selected,
@@ -561,10 +578,12 @@ private:
         .count();
   }
 
-  static void printTiming(const char *unit, std::string_view pass,
-                          long long micros) {
-    std::fprintf(stderr, "[PassManager] %s::%.*s %lld us\n", unit,
-                 static_cast<int>(pass.size()), pass.data(), micros);
+  static void noteTiming(PassContext &context, const char *unit,
+                         std::string_view pass, long long micros) {
+    if (DiagnosticEngine *diagnostics = context.diagnostics())
+      SVM_NOTE(*diagnostics, SourceLocation{},
+               "[PassManager]: %s::%.*s, %lld us.", unit,
+               static_cast<int>(pass.size()), pass.data(), micros);
   }
 
   bool runModuleStep(Step &step, Module *module, PassContext &context,
@@ -580,7 +599,7 @@ private:
     const auto start = Clock::now();
     PassResult result = step.module->run(module, context);
     if (instrumentation.timePasses)
-      printTiming("module", step.name, elapsedMicros(start));
+      noteTiming(context, "module", step.name, elapsedMicros(start));
 
     if (result.changed)
       context.invalidate(module, result.preserved, result.affectedFunctions);
@@ -610,8 +629,8 @@ private:
         const auto start = Clock::now();
         PassResult result = step.function->run(function, context);
         if (instrumentation.timePasses)
-          printTiming(function->name ? function->name : "<anonymous>",
-                      step.name, elapsedMicros(start));
+          noteTiming(context, function->name ? function->name : "<anonymous>",
+                     step.name, elapsedMicros(start));
         if (result.changed) {
           changed = true;
           context.invalidate(function, result.preserved);
@@ -629,7 +648,8 @@ private:
       }
     }
     if (instrumentation.timePasses)
-      printTiming("function-sweep", step.name, elapsedMicros(sweepStart));
+      noteTiming(context, "function-sweep", step.name,
+                 elapsedMicros(sweepStart));
     return changed;
   }
 
@@ -640,6 +660,7 @@ private:
   std::unique_ptr<PassContext> context_;     // 最近一次运行的上下文
   PrintHook printHook_ = nullptr;            // IR打印回调
   FILE *output_ = stdout;                    // 非拥有Pass输出流
+  DiagnosticEngine *diagnostics_ = nullptr;  // 非拥有统一诊断通道
   bool halted_ = false;                      // 是否命中停止插桩
 };
 

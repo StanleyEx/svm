@@ -17,6 +17,12 @@ Module *ASTToHIR::run(CompUnit *unit) {
     return nullptr;
   }
   module_ = Module::create(arena_);
+  module_->diagnostics = &diagnostics_;
+  const std::string_view source = diagnostics_.getSource();
+  module_->sourceText =
+      source.empty() ? arena_.duplicateString("", 0)
+                     : arena_.duplicateString(source.data(), source.size());
+  module_->sourceLength = source.size();
   locations_.clear();
   canonicalFunctions_.clear();
   nextStringId_ = 0;

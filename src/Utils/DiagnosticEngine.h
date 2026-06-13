@@ -59,6 +59,9 @@ public:
 
     diagnostics_.push_back({level, location, buffer});
     switch (level) {
+    case DiagnosticLevel::Note:
+      ++noteCount_;
+      break;
     case DiagnosticLevel::Warn:
       ++warningCount_;
       break;
@@ -74,6 +77,8 @@ public:
       break;
     }
   }
+
+  usize getNoteCount() const { return noteCount_; }
 
   usize getWarningCount() const { return warningCount_; }
 
@@ -116,6 +121,7 @@ private:
   Arena &arena_;
   std::string_view source_;
   std::vector<Diagnostic> diagnostics_;
+  usize noteCount_ = 0;
   usize warningCount_ = 0;
   usize errorCount_ = 0;
 };

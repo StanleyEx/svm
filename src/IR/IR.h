@@ -13,6 +13,7 @@
 
 namespace svm {
 class ASTNode;
+class DiagnosticEngine;
 class FuncDecl;
 struct SourceLocation;
 
@@ -425,6 +426,7 @@ private:
   BasicBlock *target_ = nullptr; // case CFG 目标
 
   friend class IRBuilder;
+  friend class Inst;
   friend class CFGEditor;
   friend class DeepCopy;
 };
@@ -444,6 +446,7 @@ private:
   BasicBlock *defaultTarget_ = nullptr; // 非空默认 CFG 目标
 
   friend class IRBuilder;
+  friend class Inst;
   friend class CFGEditor;
   friend class DeepCopy;
 };
@@ -496,6 +499,7 @@ private:
   }
 
   friend class IRBuilder;
+  friend class Inst;
   friend class CFGEditor;
   friend class DeepCopy;
 };
@@ -649,6 +653,8 @@ public:
   ScfPayload &getScf() noexcept;
   const ScfPayload &getScf() const noexcept;
   BasicBlock *getJumpTarget() const noexcept;
+  u32 getSuccessorSlotCount() const noexcept;             // 获取原始后继槽数量
+  BasicBlock *getSuccessorSlot(u32 index) const noexcept; // 获取原始后继槽
   Region *getBody() const noexcept;
   void setBody(Region *body) noexcept { body_ = body; }
   const SwitchPayload &getSwitch() const noexcept;
@@ -717,8 +723,9 @@ private:
   SwitchPayload &mutableSwitch() noexcept;                // Switch写入口
   void setSwitchPayload(SwitchPayload *payload) noexcept; // 设置Switch载荷
   void setJumpTarget(BasicBlock *target) noexcept;        // 设置跳转目标
-  void setJumpTable(JumpTable *table) noexcept;           // 设置跳转表
-  void setIncomingArray(BasicBlock **incoming) noexcept;  // 设置Phi前驱数组
+  void setSuccessorSlot(u32 index, BasicBlock *target) noexcept; // 改写后继槽
+  void setJumpTable(JumpTable *table) noexcept;                  // 设置跳转表
+  void setIncomingArray(BasicBlock **incoming) noexcept; // 设置Phi前驱数组
   void setIncomingBlock(u32 index, BasicBlock *block) noexcept; // 设置Phi前驱
   void dropOperand(u32 index) noexcept;                         // 卸载单个 Use
   void dropAllOperands() noexcept;                              // 卸载全部 Use
@@ -754,9 +761,10 @@ public:
   Inst *terminator() const noexcept;
   void moveBefore(BasicBlock *anchor) noexcept;
   void moveAfter(BasicBlock *anchor) noexcept;
-  void moveToStart(Region *region) noexcept;     // 移到Region首部
-  void moveToEnd(Region *region) noexcept;       // 移到Region尾部
-  void takeInstructionSuffixAfter(Inst *anchor); // 接管锚点后指令
+  void moveToStart(Region *region) noexcept;   // 移到Region首部
+  void moveToEnd(Region *region) noexcept;     // 移到Region尾部
+  void takeInstructionSuffixFrom(Inst *first); // 移动first及其后指令到当前空块
+  void takeInstructionSuffixAfter(Inst *anchor); // 移动anchor后指令到当前空块
   void takeSingleBlockRegion(Region *source);    // 接管单块Region内容
   bool atFront() const noexcept;                 // 是否Region首块
   bool atBack() const noexcept;                  // 是否Region尾块
@@ -777,6 +785,7 @@ private:
   friend class IRBuilder;
   friend class Inst;
   friend class CFGEditor;
+  friend class DeepCopy;
   friend struct Region;
   friend bool computePreds(Function *);
 };
@@ -857,6 +866,9 @@ struct Function {
 
 struct Module {
   Arena *arena = nullptr;
+  DiagnosticEngine *diagnostics = nullptr;
+  const char *sourceText = nullptr;                           // 完整源码
+  usize sourceLength = 0;                                     // 源码长度
   std::unordered_map<const ASTNode *, Global *> declToGlobal; // AST全局映射
   std::unordered_map<const FuncDecl *, Function *>
       declToFunction;                    // AST函数映射
@@ -958,6 +970,7 @@ public:
 
 private:
   Inst *newInst(OpCode op, IRType type, u32 operandCount);
+  void allocatePayload(Inst *inst);                          // 分配操作码载荷
   Inst *replaceHeader(Inst *victim, OpCode op, IRType type); // 重置指令头
   Inst *iConstImpl(i32 value, IRType type);                  // 获取整数常量
   void attach(Inst *inst);                                   // 挂接指令
@@ -1008,6 +1021,10 @@ public:
   static bool setPhiEdgeValues(Function *function, BasicBlock *succ,
                                BasicBlock *pred,
                                std::initializer_list<PhiEdgeValue> values);
+  // 为终结符中已存在 元数据中尚未登记的新边追加完整Phi列
+  static bool addPhiEdgeValues(Function *function, BasicBlock *succ,
+                               BasicBlock *pred,
+                               const std::vector<PhiEdgeValue> &values);
 
   // 将终结符及死边元数据折叠为无条件跳转
   static bool foldTerminatorToJump(Function *function, BasicBlock *pred,
@@ -1022,16 +1039,12 @@ private:
   // 删除死边元数据
   static void dropIncomingForRemovedEdge(Function *function, BasicBlock *pred,
                                          BasicBlock *succ);
-  // 追加完整 Phi 边值列
-  static bool addPhiEdgeValues(Function *function, BasicBlock *succ,
-                               BasicBlock *pred,
-                               const std::vector<PhiEdgeValue> &values);
   // 删除完整 Phi 边值列
   static bool removePhiEdgeValues(Function *function, BasicBlock *succ,
                                   BasicBlock *pred);
   // 迁移完整 Phi 边值列
-  static bool movePhiEdgeValues(Function *function, BasicBlock *succ,
-                                BasicBlock *oldPred, BasicBlock *newPred);
+  static bool movePhiEdgeValues(BasicBlock *succ, BasicBlock *oldPred,
+                                BasicBlock *newPred);
   // 重定向所有匹配物理槽
   static bool rewriteSuccessorEdges(BasicBlock *pred, BasicBlock *oldSucc,
                                     BasicBlock *newSucc);
@@ -1053,11 +1066,7 @@ private:
   static void appendPhiIncomingSlot(Function *function, Inst *phi,
                                     BasicBlock *pred, Inst *value);
   // 删除Phi槽
-  static bool erasePhiIncomingSlot(Function *function, Inst *phi,
-                                   BasicBlock *pred);
-  // 改名Phi前驱
-  static bool renamePhiIncomingBlockSlot(Inst *phi, BasicBlock *oldPred,
-                                         BasicBlock *newPred);
+  static void erasePhiIncomingSlot(Function *function, Inst *phi, u32 index);
   // 设置Phi值
   static bool setPhiIncomingValueSlot(Function *function, Inst *phi,
                                       BasicBlock *pred, Inst *value);
@@ -1081,6 +1090,10 @@ private:
 // 重建Use链
 void computeUses(Function *function);
 void replaceAllUsesWith(Function *function, Inst *from, Inst *to);
+const Inst *getEnclosingLoop(const Inst *inst) noexcept; // 查询最内层所属循环
+Inst *getEnclosingLoop(Inst *inst) noexcept;
+const Inst *getMemoryBase(const Inst *address) noexcept; // 寻址得到基对象
+Inst *getMemoryBase(Inst *address) noexcept;
 std::vector<BasicBlock *> computeRPO(Function *function);
 // 规范化LIR/MIR顶层扁平CFG的前驱和Phi输入
 bool computePreds(Function *function);
@@ -1151,25 +1164,8 @@ inline void forEachSuccessor(Inst *terminator, Func &&func) {
     func(successor);
   };
 
-  OpCode op = terminator->getOp();
-  if (op == OP_JMP || op == MOP_J) {
-    visit(terminator->getJumpTarget());
-  } else if (op == OP_BR || isMachineBranch(op)) {
-    visit(terminator->getBr().trueBB);
-    visit(terminator->getBr().falseBB);
-  } else if (op == OP_SWITCH) {
-    const SwitchPayload &payload = terminator->getSwitch();
-    for (u32 i = 0; i < payload.getCaseCount(); ++i)
-      visit(payload.getCase(i).getTarget());
-    visit(payload.getDefaultTarget());
-  } else if (op == MOP_JT_DISPATCH) {
-    JumpTable *table = terminator->getJumpTable();
-    if (table) {
-      for (u32 i = 0; i < table->getEntryCount(); ++i)
-        visit(table->getTarget(i));
-      visit(table->getDefaultTarget());
-    }
-  }
+  for (u32 index = 0; index < terminator->getSuccessorSlotCount(); ++index)
+    visit(terminator->getSuccessorSlot(index));
 }
 
 template <typename Func>

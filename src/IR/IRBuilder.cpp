@@ -7,6 +7,42 @@
 namespace svm {
 namespace ir {
 
+void IRBuilder::allocatePayload(Inst *inst) {
+  assert(inst && function_ && function_->arena);
+  switch (inst->op_) {
+  case OP_ALLOCA:
+  case OP_LOAD:
+  case OP_STORE:
+    inst->mem_ = function_->arena->create<MemPayload>();
+    break;
+  case OP_ARRAYIDX:
+    inst->array_ = function_->arena->create<ArrayPayload>();
+    break;
+  case OP_CALL:
+  case MOP_CALL:
+    inst->callInfo_ = function_->arena->create<CallInfoPayload>();
+    break;
+  case OP_BR:
+  case MOP_BEQ:
+  case MOP_BNE:
+  case MOP_BLT:
+  case MOP_BGE:
+  case MOP_BLTU:
+  case MOP_BGTU:
+    inst->branch_ = function_->arena->create<BrPayload>();
+    break;
+  case OP_IF:
+  case OP_WHILE:
+    inst->scf_ = function_->arena->create<ScfPayload>();
+    break;
+  case OP_SWITCH:
+    inst->switch_ = function_->arena->create<SwitchPayload>();
+    break;
+  default:
+    break;
+  }
+}
+
 IRBuilder::IRBuilder(Module *module, Function *function) noexcept
     : module_(module), function_(function) {
   assert(module_ && function_ && function_->arena);
@@ -52,39 +88,7 @@ Inst *IRBuilder::newInst(OpCode op, IRType type, u32 operandCount) {
                     : inst->inlineArgs_;
   inst->uses_ = nullptr;
   std::memset(inst->payload_, 0, sizeof(inst->payload_));
-
-  switch (op) {
-  case OP_ALLOCA:
-  case OP_LOAD:
-  case OP_STORE:
-    inst->mem_ = function_->arena->create<MemPayload>();
-    break;
-  case OP_ARRAYIDX:
-    inst->array_ = function_->arena->create<ArrayPayload>();
-    break;
-  case OP_CALL:
-  case MOP_CALL:
-    inst->callInfo_ = function_->arena->create<CallInfoPayload>();
-    break;
-  case OP_BR:
-  case MOP_BEQ:
-  case MOP_BNE:
-  case MOP_BLT:
-  case MOP_BGE:
-  case MOP_BLTU:
-  case MOP_BGTU:
-    inst->branch_ = function_->arena->create<BrPayload>();
-    break;
-  case OP_IF:
-  case OP_WHILE:
-    inst->scf_ = function_->arena->create<ScfPayload>();
-    break;
-  case OP_SWITCH:
-    inst->switch_ = function_->arena->create<SwitchPayload>();
-    break;
-  default:
-    break;
-  }
+  allocatePayload(inst);
 
   inst->arena = function_->arena;
   inst->prev_ = nullptr;
@@ -142,39 +146,7 @@ Inst *IRBuilder::replaceHeader(Inst *victim, OpCode op, IRType type) {
   victim->inlineArgs_[1] = {};
   victim->args_ = victim->inlineArgs_;
   std::memset(victim->payload_, 0, sizeof(victim->payload_));
-
-  switch (op) {
-  case OP_ALLOCA:
-  case OP_LOAD:
-  case OP_STORE:
-    victim->mem_ = function_->arena->create<MemPayload>();
-    break;
-  case OP_ARRAYIDX:
-    victim->array_ = function_->arena->create<ArrayPayload>();
-    break;
-  case OP_CALL:
-  case MOP_CALL:
-    victim->callInfo_ = function_->arena->create<CallInfoPayload>();
-    break;
-  case OP_BR:
-  case MOP_BEQ:
-  case MOP_BNE:
-  case MOP_BLT:
-  case MOP_BGE:
-  case MOP_BLTU:
-  case MOP_BGTU:
-    victim->branch_ = function_->arena->create<BrPayload>();
-    break;
-  case OP_IF:
-  case OP_WHILE:
-    victim->scf_ = function_->arena->create<ScfPayload>();
-    break;
-  case OP_SWITCH:
-    victim->switch_ = function_->arena->create<SwitchPayload>();
-    break;
-  default:
-    break;
-  }
+  allocatePayload(victim);
   return victim;
 }
 
@@ -563,15 +535,15 @@ IRBuilder::Coerced IRBuilder::coercePair(Inst *left, Inst *right) {
     return {left, nullptr, left->getType()};
 
   if (left->getType() == TY_I1)
-    left = emit(OP_ZEXT, TY_I32, left);
+    left = castTo(left, TY_I32);
   if (right->getType() == TY_I1)
-    right = emit(OP_ZEXT, TY_I32, right);
+    right = castTo(right, TY_I32);
   if (left->getType() == right->getType())
     return {left, right, left->getType()};
   if (left->getType() == TY_I32 && right->getType() == TY_F32)
-    return {emit(OP_I2F, TY_F32, left), right, TY_F32};
+    return {castTo(left, TY_F32), right, TY_F32};
   if (left->getType() == TY_F32 && right->getType() == TY_I32)
-    return {left, emit(OP_I2F, TY_F32, right), TY_F32};
+    return {left, castTo(right, TY_F32), TY_F32};
   return {left, right, left->getType()};
 }
 

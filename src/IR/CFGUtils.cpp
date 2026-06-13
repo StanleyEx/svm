@@ -299,38 +299,19 @@ void CFGEditor::appendPhiIncomingSlot(Function *function, Inst *phi,
   rebuildPhiIncomingSlots(function, phi, preds, values);
 }
 
-bool CFGEditor::erasePhiIncomingSlot(Function *function, Inst *phi,
-                                     BasicBlock *pred) {
+void CFGEditor::erasePhiIncomingSlot(Function *function, Inst *phi, u32 index) {
+  assert(index < phi->operandCount_);
   std::vector<BasicBlock *> preds;
   std::vector<Inst *> values;
-  preds.reserve(phi->operandCount_);
-  values.reserve(phi->operandCount_);
-  bool found = false;
+  preds.reserve(phi->operandCount_ - 1);
+  values.reserve(phi->operandCount_ - 1);
   for (u32 i = 0; i < phi->operandCount_; ++i) {
-    if (phi->incoming_[i] == pred) {
-      if (found)
-        return false;
-      found = true;
+    if (i == index)
       continue;
-    }
     preds.push_back(phi->incoming_[i]);
     values.push_back(phi->args_[i].inst);
   }
-  if (!found)
-    return false;
   rebuildPhiIncomingSlots(function, phi, preds, values);
-  return true;
-}
-
-bool CFGEditor::renamePhiIncomingBlockSlot(Inst *phi, BasicBlock *oldPred,
-                                           BasicBlock *newPred) {
-  for (u32 i = 0; i < phi->operandCount_; ++i) {
-    if (phi->incoming_[i] != oldPred)
-      continue;
-    phi->incoming_[i] = newPred;
-    return true;
-  }
-  return false;
 }
 
 bool CFGEditor::setPhiIncomingValueSlot(Function *, Inst *phi, BasicBlock *pred,
@@ -402,28 +383,29 @@ bool CFGEditor::removePhiEdgeValues(Function *function, BasicBlock *succ,
                                     BasicBlock *pred) {
   if (!function || !succ || !pred)
     return false;
-  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_)
-    if (!getPhiIncomingValue(phi, pred))
-      return false;
-  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_)
-    erasePhiIncomingSlot(function, phi, pred);
+  const u32 index = findPredecessorIndex(succ, pred);
+  if (index == std::numeric_limits<u32>::max())
+    return false;
+  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_) {
+    assert(index < phi->operandCount_ && phi->incoming_[index] == pred);
+    erasePhiIncomingSlot(function, phi, index);
+  }
   return true;
 }
 
-bool CFGEditor::movePhiEdgeValues(Function *, BasicBlock *succ,
-                                  BasicBlock *oldPred, BasicBlock *newPred) {
+bool CFGEditor::movePhiEdgeValues(BasicBlock *succ, BasicBlock *oldPred,
+                                  BasicBlock *newPred) {
   if (!succ || !oldPred || !newPred || oldPred == newPred)
     return false;
   const u32 oldIndex = findPredecessorIndex(succ, oldPred);
   if (oldIndex == std::numeric_limits<u32>::max() ||
       hasPredecessorSlot(succ, newPred))
     return false;
-  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_)
-    if (!getPhiIncomingValue(phi, oldPred) || getPhiIncomingValue(phi, newPred))
-      return false;
-
-  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_)
-    renamePhiIncomingBlockSlot(phi, oldPred, newPred);
+  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_) {
+    assert(oldIndex < phi->operandCount_ &&
+           phi->incoming_[oldIndex] == oldPred);
+    phi->incoming_[oldIndex] = newPred;
+  }
   succ->predecessors_[oldIndex] = newPred;
   return true;
 }
@@ -492,41 +474,10 @@ bool CFGEditor::rewriteSuccessorEdges(BasicBlock *pred, BasicBlock *oldSucc,
     return false;
   Inst *term = pred->terminator();
   bool changed = false;
-  if (term->op_ == OP_JMP || term->op_ == MOP_J) {
-    term->jumpTarget_ = newSucc;
-    return true;
-  }
-  if (term->op_ == OP_BR || isMachineBranch(term->op_)) {
-    if (term->branch_->trueBB == oldSucc) {
-      term->branch_->trueBB = newSucc;
-      changed = true;
-    }
-    if (term->branch_->falseBB == oldSucc) {
-      term->branch_->falseBB = newSucc;
-      changed = true;
-    }
-    return changed;
-  }
-  if (term->op_ == OP_SWITCH) {
-    for (u32 i = 0; i < term->switch_->caseCount_; ++i)
-      if (term->switch_->cases_[i].target_ == oldSucc) {
-        term->switch_->cases_[i].target_ = newSucc;
-        changed = true;
-      }
-    if (term->switch_->defaultTarget_ == oldSucc) {
-      term->switch_->defaultTarget_ = newSucc;
-      changed = true;
-    }
-    return changed;
-  }
-  JumpTable *table = term->jumpTable_;
-  for (u32 i = 0; i < table->entryCount_; ++i)
-    if (table->target_[i] == oldSucc) {
-      table->target_[i] = newSucc;
-      changed = true;
-    }
-  if (table->defaultTarget_ == oldSucc) {
-    table->defaultTarget_ = newSucc;
+  for (u32 index = 0; index < term->getSuccessorSlotCount(); ++index) {
+    if (term->getSuccessorSlot(index) != oldSucc)
+      continue;
+    term->setSuccessorSlot(index, newSucc);
     changed = true;
   }
   return changed;
@@ -598,10 +549,6 @@ BasicBlock *CFGEditor::splitCriticalEdge(Function *function, BasicBlock *pred,
       succ->getPredecessorCount() <= 1 || !hasPredecessorSlot(succ, pred))
     return nullptr;
 
-  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_)
-    if (!getPhiIncomingValue(phi, pred))
-      return nullptr;
-
   IRBuilder builder(function->module, function);
   BasicBlock *middle = builder.newBlockAfter(pred);
   builder.setInsertAtEnd(middle);
@@ -613,7 +560,7 @@ BasicBlock *CFGEditor::splitCriticalEdge(Function *function, BasicBlock *pred,
   }
 
   const bool rewritten = rewriteSuccessorEdges(pred, succ, middle);
-  const bool moved = movePhiEdgeValues(function, succ, pred, middle);
+  const bool moved = movePhiEdgeValues(succ, pred, middle);
   assert(rewritten && moved);
   UNUSED(rewritten);
   UNUSED(moved);
@@ -891,7 +838,7 @@ bool CFGEditor::mergeBlockIntoPredecessor(Function *function, BasicBlock *pred,
   // 指令搬迁不改变边上的值 只需把后继中的incoming身份由succ改名为pred
   // 对应operand Use保持不变
   for (BasicBlock *target : oldSuccessors) {
-    const bool moved = movePhiEdgeValues(function, target, succ, pred);
+    const bool moved = movePhiEdgeValues(target, succ, pred);
     assert(moved);
     UNUSED(moved);
     assert(hasConsistentIncomingState(target));
