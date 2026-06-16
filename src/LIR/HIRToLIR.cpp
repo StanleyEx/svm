@@ -7,6 +7,8 @@
 
 namespace svm::ir {
 namespace {
+constexpr i32 kZeroInitUnrollThreshold = 64; // 超过阈值的局部零初始化展开为循环
+
 class HIRToLIR {
 public:
   bool run(Module *module);
@@ -15,6 +17,8 @@ public:
 private:
   void hoistAllocas(Function *function);
   void materializeLocalInitializers(Function *function);
+  void emitZeroInitializerLoop(Function *function, Inst *anchor, Inst *base,
+                               i32 begin, i32 count, IRType type);
   void lowerArrayIndices(Function *function);
   void flattenRegion(Region *region);
   void flattenBlock(BasicBlock *block);
@@ -107,25 +111,69 @@ void HIRToLIR::materializeLocalInitializers(Function *function) {
     builder_->setCurrentSourceLocation(anchor->sourceLocation);
     Inst *base = anchor->getArg(0);
     const i32 begin = anchor->getArg(1)->getImm();
+    assert(base && base->getOp() == OP_ALLOCA && begin >= 0);
     const IRType type = base->getMem().elementType;
-    const i32 stride = typeSizeBytes(type);
+    const i32 elementSize = typeSizeBytes(type);
+    assert(elementSize > 0);
     if (anchor->getOp() == OP_LOCAL_INIT_VALUE) {
-      Inst *address =
-          builder_->emitGetPtr(base, builder_->iConst(begin), stride);
+      const i64 wideOffset = static_cast<i64>(begin) * elementSize;
+      assert(wideOffset <= std::numeric_limits<i32>::max());
+      Inst *address = builder_->emitGetPtr(
+          base, builder_->iConst(static_cast<i32>(wideOffset)));
       builder_->emitStore(address, anchor->getArg(2), type);
     } else {
       const i32 count = anchor->getArg(2)->getImm();
+      assert(count >= 0 && begin <= std::numeric_limits<i32>::max() - count);
       Inst *zero =
           type == TY_F32 ? builder_->fConst(0.0F) : builder_->iConst(0);
-      for (i32 index = 0; index < count; ++index) {
-        Inst *offset = builder_->iConst(begin + index);
-        Inst *address = builder_->emitGetPtr(base, offset, stride);
-        builder_->emitStore(address, zero, type);
+      if (count > kZeroInitUnrollThreshold) {
+        emitZeroInitializerLoop(function, anchor, base, begin, count, type);
+      } else {
+        for (i32 index = 0; index < count; ++index) {
+          const i64 wideOffset = static_cast<i64>(begin + index) * elementSize;
+          assert(wideOffset <= std::numeric_limits<i32>::max());
+          Inst *address = builder_->emitGetPtr(
+              base, builder_->iConst(static_cast<i32>(wideOffset)));
+          builder_->emitStore(address, zero, type);
+        }
       }
     }
     base->getMem().initInfo = nullptr;
-    anchor->eraseFromBlock();
+    const bool erased = anchor->eraseFromBlock();
+    assert(erased);
+    UNUSED(erased);
   }
+}
+
+void HIRToLIR::emitZeroInitializerLoop(Function *function, Inst *anchor,
+                                       Inst *base, i32 begin, i32 count,
+                                       IRType type) {
+  assert(function && anchor && base && count > kZeroInitUnrollThreshold);
+  BasicBlock *entry = function->region ? function->region->first : nullptr;
+  assert(entry);
+
+  builder_->setInsertAtStart(entry);
+  Inst *ivAddress = builder_->emitAlloca(typeSizeBytes(TY_I32), TY_I32);
+
+  Region *parent = anchor->parentBlock()->parentRegion;
+  Region *body = builder_->newRegion(nullptr, parent);
+  BasicBlock *bodyBlock = builder_->newBlockAtEnd(body);
+  builder_->setInsertAtEnd(bodyBlock);
+  Inst *index = builder_->emitLoad(ivAddress, TY_I32);
+  Inst *byteOffset = index;
+  const i32 elementSize = typeSizeBytes(type);
+  if (elementSize != 1)
+    byteOffset =
+        builder_->emit(OP_MUL, TY_I32, index, builder_->iConst(elementSize));
+  Inst *address = builder_->emitGetPtr(base, byteOffset);
+  Inst *zero = type == TY_F32 ? builder_->fConst(0.0F) : builder_->iConst(0);
+  builder_->emitStore(address, zero, type);
+  builder_->emitYield();
+
+  builder_->setInsertBefore(anchor);
+  builder_->emitStore(ivAddress, builder_->iConst(begin), TY_I32);
+  builder_->emitFor(builder_->iConst(begin + count), builder_->iConst(1),
+                    ivAddress, body);
 }
 
 void HIRToLIR::lowerArrayIndices(Function *function) {

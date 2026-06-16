@@ -417,8 +417,9 @@ Inst *ASTToHIR::lowerLocalStorage(const ASTNode *declaration, Type *type,
   const u64 wideCount = array ? array->totalSize() : 1;
   const u64 wideBytes =
       wideCount * static_cast<u64>(typeSizeBytes(elementType));
-  if (wideCount == 0 || wideCount > std::numeric_limits<u32>::max() ||
-      wideBytes > std::numeric_limits<u32>::max()) {
+  if (wideCount == 0 ||
+      wideCount > static_cast<u64>(std::numeric_limits<i32>::max()) ||
+      wideBytes > static_cast<u64>(std::numeric_limits<i32>::max())) {
     diagnose(declaration->getLocation(), "local object has an invalid size");
     return nullptr;
   }
@@ -469,14 +470,14 @@ Inst *ASTToHIR::lowerLocalStorage(const ASTNode *declaration, Type *type,
   const u32 resultSegmentCount = segmentCount + (needsTailZero ? 1U : 0U);
   LocalInitInfo *info = arena_.create<LocalInitInfo>();
   info->elementType = elementType;
-  info->segmentCount = resultSegmentCount;
-  info->segments = arena_.createArray<LocalInitSegment>(resultSegmentCount);
+  info->segments.reserve(resultSegmentCount);
   u64 baseOffset = 0;
   // 初始化锚点只描述逻辑区间和值 暂不展开为逐元素Store
   // 后续Pass可以优化为批量清零或常量物化等
   for (u32 segment = 0; segment < segmentCount; ++segment) {
     InitSegment &source = segments[segment];
-    LocalInitSegment &destination = info->segments[segment];
+    info->segments.emplace_back();
+    LocalInitSegment &destination = info->segments.back();
     destination.count = static_cast<u32>(source.initCount);
     if (!source.initExprs) {
       Inst *args[] = {storage, builder_->iConst(static_cast<i32>(baseOffset)),
@@ -486,7 +487,7 @@ Inst *ASTToHIR::lowerLocalStorage(const ASTNode *declaration, Type *type,
       destination.zeroAnchor =
           builder_->emitN(OP_LOCAL_INIT_ZERO, TY_VOID, args, 3);
     } else {
-      destination.values = arena_.createArray<Inst *>(destination.count);
+      destination.values.reserve(destination.count);
       for (u32 index = 0; index < destination.count; ++index) {
         ExprNode *expression = source.initExprs[index];
         Inst *value = expression ? lowerExpr(expression) : nullptr;
@@ -500,14 +501,15 @@ Inst *ASTToHIR::lowerLocalStorage(const ASTNode *declaration, Type *type,
         setSourceLocation(expression ? static_cast<ASTNode *>(expression)
                                      : declaration);
         // 锚点同时固定数组偏移和动态表达式的源码顺序
-        destination.values[index] =
-            builder_->emitN(OP_LOCAL_INIT_VALUE, TY_VOID, args, 3);
+        destination.values.push_back(
+            builder_->emitN(OP_LOCAL_INIT_VALUE, TY_VOID, args, 3));
       }
     }
     baseOffset += source.initCount;
   }
   if (needsTailZero) {
-    LocalInitSegment &tail = info->segments[segmentCount];
+    info->segments.emplace_back();
+    LocalInitSegment &tail = info->segments.back();
     tail.count = static_cast<u32>(wideCount - validatedCount);
     Inst *args[] = {storage, builder_->iConst(static_cast<i32>(baseOffset)),
                     builder_->iConst(static_cast<i32>(tail.count))};

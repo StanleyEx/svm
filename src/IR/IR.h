@@ -395,15 +395,14 @@ struct Use {
 
 struct LocalInitSegment {
   // 数据段: values[k]指向OP_LOCAL_INIT_VALUE 真实值在values[k]->getArg(2)
-  // 全零段: values == nullptr, zeroAnchor指向OP_LOCAL_INIT_ZERO
-  Inst **values = nullptr;
+  // 全零段: values为空, zeroAnchor指向OP_LOCAL_INIT_ZERO
+  std::vector<Inst *> values;
   u32 count = 0;
   Inst *zeroAnchor = nullptr; // OP_LOCAL_INIT_ZERO
 };
 
 struct LocalInitInfo {
-  LocalInitSegment *segments = nullptr;
-  u32 segmentCount = 0;
+  std::vector<LocalInitSegment> segments;
   IRType elementType = TY_I32;
 };
 
@@ -508,7 +507,6 @@ struct Global {
   enum class GlobalOrigin : u8 {
     SourceGlobal, // 源码定义的全局变量
     StringLiteral,
-    GlobalizedLocal,
   };
   Global *prev = nullptr, *next = nullptr;
   const char *name = nullptr;
