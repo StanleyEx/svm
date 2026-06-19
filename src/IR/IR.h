@@ -691,7 +691,7 @@ private:
   bool undefValue_ = false;     // 是否为undef值
   InstRef inlineArgs_[2] = {};  // 小操作数存储
   InstRef *args_ = inlineArgs_; // 操作数存储
-  Use *uses_ = nullptr;         // Use链表头
+  Use *uses_ = nullptr;         // Use链表头 整个Use链由IR增量维护 不是分析结果
   Inst *prev_ = nullptr;        // 指令链表前项
   Inst *next_ = nullptr;        // 指令链表后项
   BasicBlock *block_ = nullptr; // 所属基本块
@@ -965,6 +965,7 @@ public:
   Inst *replaceWithJumpAndEraseSuffix(Inst *victim,
                                       BasicBlock *target); // 替换跳转并删除后缀
   void eraseAfter(Inst *anchor);                           // 删除锚点后指令
+  bool eraseRegionContents(Region *region);                // 删除Region内指令
 
 private:
   Inst *newInst(OpCode op, IRType type, u32 operandCount);
@@ -1085,13 +1086,13 @@ private:
   friend bool cleanupDeadBlocks(Function *function);
 };
 
-// 重建Use链
-void computeUses(Function *function);
+void computeUses(Function *function); // 重建Use链 当作批量修复工具
 void replaceAllUsesWith(Function *function, Inst *from, Inst *to);
 const Inst *getEnclosingLoop(const Inst *inst) noexcept; // 查询最内层所属循环
 Inst *getEnclosingLoop(Inst *inst) noexcept;
 const Inst *getMemoryBase(const Inst *address) noexcept; // 寻址得到基对象
 Inst *getMemoryBase(Inst *address) noexcept;
+bool mayAlias(const Inst *left, const Inst *right) noexcept; // 简易地址别名分析
 std::vector<BasicBlock *> computeRPO(Function *function);
 // 规范化LIR/MIR顶层扁平CFG的前驱和Phi输入
 bool computePreds(Function *function);

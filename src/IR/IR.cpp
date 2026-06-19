@@ -446,6 +446,21 @@ Inst *getMemoryBase(Inst *address) noexcept {
   return const_cast<Inst *>(getMemoryBase(static_cast<const Inst *>(address)));
 }
 
+// 判断两个内存地址是否可能别名
+bool mayAlias(const Inst *left, const Inst *right) noexcept {
+  if (!left || !right)
+    return true;
+  if (left == right)
+    return true; // 地址完全一致 别名
+  const OpCode leftOp = left->getOp();
+  const OpCode rightOp = right->getOp();
+  if (leftOp == OP_ALLOCA || rightOp == OP_ALLOCA)
+    return false; // 局部栈分配空间相互隔离 不与全局变量重叠 非别名
+  if (leftOp == OP_GETGLOBAL && rightOp == OP_GETGLOBAL)
+    return false; // 两个不同的全局变量 非别名
+  return true;
+}
+
 BasicBlock *Inst::unlinkFromBlock() noexcept {
   BasicBlock *oldBlock = block_;
   if (!oldBlock)

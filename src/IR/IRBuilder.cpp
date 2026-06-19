@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace svm {
 namespace ir {
@@ -208,6 +209,30 @@ void IRBuilder::eraseAfter(Inst *anchor) {
     assert(erased);
     UNUSED(erased);
   }
+}
+
+bool IRBuilder::eraseRegionContents(Region *region) {
+  if (!region || region == function_->region || region->function != function_ ||
+      (region->owner && !region->owner->isErased()))
+    return false;
+
+  std::vector<Inst *> instructions;
+  forEachInstRecursive(region,
+                       [&](Inst *inst) { instructions.push_back(inst); });
+
+  // 先切断整个死图的Use-Def边 再执行物理脱链 不依赖指令拓扑顺序
+  for (Inst *inst : instructions)
+    inst->dropAllOperands();
+  for (auto it = instructions.rbegin(); it != instructions.rend(); ++it) {
+    if (!(*it)->parentBlock())
+      continue;
+    const bool erased = (*it)->eraseFromBlock();
+    assert(erased);
+    UNUSED(erased);
+  }
+  region->owner = nullptr;
+  region->parent = nullptr;
+  return true;
 }
 
 Inst *IRBuilder::iConstImpl(i32 value, IRType type) {

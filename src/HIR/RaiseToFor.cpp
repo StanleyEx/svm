@@ -43,21 +43,6 @@ struct StepPlan {
   i32 constant = 0; // 规范化后的常量步长 仅当action == Constant时有效
 };
 
-// 判断两个内存地址是否可能别名
-bool mayAlias(Inst *left, Inst *right) noexcept {
-  if (!left || !right)
-    return true;
-  if (left == right)
-    return true; // 地址完全一致 别名
-  const OpCode leftOp = left->getOp();
-  const OpCode rightOp = right->getOp();
-  if (leftOp == OP_ALLOCA || rightOp == OP_ALLOCA)
-    return false; // 局部栈分配空间相互隔离 不与全局变量重叠 非别名
-  if (leftOp == OP_GETGLOBAL && rightOp == OP_GETGLOBAL)
-    return false; // 两个不同的全局变量 非别名
-  return true;
-}
-
 // 判断指针是否逃逸
 // 追踪内存基址的Ues-Def 链 若存在非GetPtr/ArrayIdx的用户 则认为逃逸
 // true表示逃逸 可能被外部函数等写入 false表示未逃逸
