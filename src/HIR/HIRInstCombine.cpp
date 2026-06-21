@@ -1,16 +1,10 @@
-#include "PassManager.h"
+#include "HIRPass.h"
 
 #include <optional>
 #include <vector>
 
 namespace svm::ir {
 namespace {
-class HIRInstCombine final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "hir-inst-combine"; }
-  PassResult run(Function *function, PassContext &context) override;
-};
-
 Inst *foldGlobalLoad(Inst *load, IRBuilder &builder) {
   if (load->getOperandCount() != 1 ||
       (load->getType() != TY_I32 && load->getType() != TY_F32) ||
@@ -88,6 +82,10 @@ Inst *foldGlobalLoad(Inst *load, IRBuilder &builder) {
 
 } // namespace
 
+std::string_view HIRInstCombine::name() const noexcept {
+  return "hir-inst-combine";
+}
+
 PassResult HIRInstCombine::run(Function *function, PassContext &) {
   if (!function || function->isExtern || function->phase != IRPhase::HIR)
     return PassResult::noChange();
@@ -151,5 +149,3 @@ PassResult HIRInstCombine::run(Function *function, PassContext &) {
 }
 
 } // namespace svm::ir
-
-SVM_REGISTER_FUNCTION_PASS("hir-inst-combine", svm::ir::HIRInstCombine)

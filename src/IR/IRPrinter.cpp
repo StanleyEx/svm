@@ -1,5 +1,6 @@
+#include "HIR/HIRPass.h"
 #include "IR.h"
-#include "PassManager.h"
+#include "LIR/LIRPass.h"
 
 #include <cassert>
 #include <cinttypes>
@@ -678,35 +679,26 @@ private:
   u32 lastSourceLine_ = 0; // 上次打印的源码行
 };
 
-class PrintHIR final : public ModulePass {
-public:
-  explicit PrintHIR(const PassOptions &options)
-      : printSource_(options.getBool("print-hir-source", true)) {}
-  std::string_view name() const noexcept override { return "print-hir"; }
-  PassResult run(Module *module, PassContext &context) override {
-    IRPrinter(context.output(), PrintMode::HIR, printSource_).print(module);
-    return PassResult::noChange();
-  }
-
-private:
-  bool printSource_ = true;
-};
-
-class PrintLLVMIR final : public ModulePass {
-public:
-  explicit PrintLLVMIR(const PassOptions &options)
-      : printSource_(options.getBool("print-llvm-ir-source", true)) {}
-  std::string_view name() const noexcept override { return "print-llvm-ir"; }
-  PassResult run(Module *module, PassContext &context) override {
-    IRPrinter(context.output(), PrintMode::LLVM, printSource_).print(module);
-    return PassResult::noChange();
-  }
-
-private:
-  bool printSource_ = true;
-};
 } // namespace
-} // namespace svm::ir
 
-SVM_REGISTER_MODULE_PASS("print-hir", svm::ir::PrintHIR)
-SVM_REGISTER_MODULE_PASS("print-llvm-ir", svm::ir::PrintLLVMIR)
+PrintHIR::PrintHIR(FILE *output, bool printSource) noexcept
+    : output_(output ? output : stdout), printSource_(printSource) {}
+
+std::string_view PrintHIR::name() const noexcept { return "print-hir"; }
+
+PassResult PrintHIR::run(Module *module, PassContext &) {
+  IRPrinter(output_, PrintMode::HIR, printSource_).print(module);
+  return PassResult::noChange();
+}
+
+PrintLLVMIR::PrintLLVMIR(FILE *output, bool printSource) noexcept
+    : output_(output ? output : stdout), printSource_(printSource) {}
+
+std::string_view PrintLLVMIR::name() const noexcept { return "print-llvm-ir"; }
+
+PassResult PrintLLVMIR::run(Module *module, PassContext &) {
+  IRPrinter(output_, PrintMode::LLVM, printSource_).print(module);
+  return PassResult::noChange();
+}
+
+} // namespace svm::ir

@@ -1,4 +1,4 @@
-#include "PassManager.h"
+#include "HIRPass.h"
 
 #include <vector>
 
@@ -9,12 +9,6 @@ struct TailReturn {
   Inst *call = nullptr;    // 当前函数的尾调用 OP_CALL
   Inst *wrapper = nullptr; // 可选的整数加法或乘法包装 OP_ADD/OP_MUL
   Inst *term = nullptr;    // 本轮累加/累乘的项或因子
-};
-
-class TCO final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "tco"; }
-  PassResult run(Function *function, PassContext &) override;
 };
 
 bool collectScalarParamSlots(Function *function, std::vector<Inst *> &slots,
@@ -300,11 +294,12 @@ bool transform(Function *function) {
   return true;
 }
 
+} // namespace
+
+std::string_view TCO::name() const noexcept { return "tco"; }
+
 PassResult TCO::run(Function *function, PassContext &) {
   return transform(function) ? PassResult::changedIR() : PassResult::noChange();
 }
 
-} // namespace
 } // namespace svm::ir
-
-SVM_REGISTER_FUNCTION_PASS("tco", svm::ir::TCO)

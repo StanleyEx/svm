@@ -1,5 +1,6 @@
 #include "Analysis.h"
 #include "IR.h"
+#include "LIRPass.h"
 
 #include <cassert>
 #include <cstdlib>
@@ -285,80 +286,76 @@ void rename(Function *function, const DomAnalysis &dom,
 
 } // namespace
 
-class Mem2RegPass final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "mem2reg"; }
-  PassResult run(Function *function, PassContext &context) override {
-    if (!function || function->isExtern || function->phase != IRPhase::LIR ||
-        !function->region || !function->region->first)
-      return PassResult::noChange();
+std::string_view Mem2RegPass::name() const noexcept { return "mem2reg"; }
 
-    const bool cfgChanged = cleanupDeadBlocks(function);
-    if (cfgChanged)
-      context.invalidate(function, PreservedAnalyses::none());
-    const DomAnalysis &dom = context.get<DomAnalysis>(function);
+PassResult Mem2RegPass::run(Function *function, PassContext &context) {
+  if (!function || function->isExtern || function->phase != IRPhase::LIR ||
+      !function->region || !function->region->first)
+    return PassResult::noChange();
 
-    BasicBlock *entry = function->region->first;
-    std::vector<Inst *> candidates;
-    for (Inst *inst = entry->firstInst(); inst; inst = inst->next())
-      if (isPromotableAlloca(inst, entry))
-        candidates.push_back(inst);
+  const bool cfgChanged = cleanupDeadBlocks(function);
+  if (cfgChanged)
+    context.invalidate(function, PreservedAnalyses::none());
+  const DomAnalysis &dom = context.get<DomAnalysis>(function);
 
-    bool changed = cfgChanged;
-    IRBuilder builder(function->module, function);
-    BlockPhiMap blockPhis;
-    std::unordered_map<IRType, Inst *> undefCache;
-    std::vector<Promotion> promotions;
-    promotions.reserve(candidates.size());
-    for (Inst *candidate : candidates) {
-      AllocaInfo info = collectInfo(candidate);
-      if (info.loads.empty()) {
-        eraseAll(info.stores);
-        if (!info.alloca->eraseFromBlock())
-          std::abort();
-        changed = true;
-        continue;
-      }
-      if (trySingleStore(function, info, dom)) {
-        changed = true;
-        continue;
-      }
-      if (tryRewriteLocally(function, info)) {
-        eraseAll(info.loads);
-        eraseAll(info.stores);
-        if (!info.alloca->eraseFromBlock())
-          std::abort();
-        changed = true;
-        continue;
-      }
-      Inst *&undef = undefCache[info.alloca->getMem().elementType];
-      if (!undef)
-        undef = builder.makeUndef(info.alloca->getMem().elementType);
-      const usize id = promotions.size();
-      promotions.push_back({info.alloca, undef});
-      placePhis(info, id, dom, builder, undef, blockPhis);
-    }
+  BasicBlock *entry = function->region->first;
+  std::vector<Inst *> candidates;
+  for (Inst *inst = entry->firstInst(); inst; inst = inst->next())
+    if (isPromotableAlloca(inst, entry))
+      candidates.push_back(inst);
 
-    if (!promotions.empty()) {
-      rename(function, dom, promotions, blockPhis);
-      for (const Promotion &promotion : promotions)
-        if (!promotion.alloca->eraseFromBlock())
-          std::abort();
+  bool changed = cfgChanged;
+  IRBuilder builder(function->module, function);
+  BlockPhiMap blockPhis;
+  std::unordered_map<IRType, Inst *> undefCache;
+  std::vector<Promotion> promotions;
+  promotions.reserve(candidates.size());
+  for (Inst *candidate : candidates) {
+    AllocaInfo info = collectInfo(candidate);
+    if (info.loads.empty()) {
+      eraseAll(info.stores);
+      if (!info.alloca->eraseFromBlock())
+        std::abort();
       changed = true;
+      continue;
     }
-
-    if (!changed)
-      return PassResult::noChange();
-    PreservedAnalyses preserved;
-    if (!cfgChanged)
-      preserved.preserveCFGAnalyses();
-    else
-      preserved.preserve<DomAnalysis>();
-    preserved.preserveSSAForm();
-    return PassResult::changedIR(std::move(preserved));
+    if (trySingleStore(function, info, dom)) {
+      changed = true;
+      continue;
+    }
+    if (tryRewriteLocally(function, info)) {
+      eraseAll(info.loads);
+      eraseAll(info.stores);
+      if (!info.alloca->eraseFromBlock())
+        std::abort();
+      changed = true;
+      continue;
+    }
+    Inst *&undef = undefCache[info.alloca->getMem().elementType];
+    if (!undef)
+      undef = builder.makeUndef(info.alloca->getMem().elementType);
+    const usize id = promotions.size();
+    promotions.push_back({info.alloca, undef});
+    placePhis(info, id, dom, builder, undef, blockPhis);
   }
-};
+
+  if (!promotions.empty()) {
+    rename(function, dom, promotions, blockPhis);
+    for (const Promotion &promotion : promotions)
+      if (!promotion.alloca->eraseFromBlock())
+        std::abort();
+    changed = true;
+  }
+
+  if (!changed)
+    return PassResult::noChange();
+  PreservedAnalyses preserved;
+  if (!cfgChanged)
+    preserved.preserveCFGAnalyses();
+  else
+    preserved.preserve<DomAnalysis>();
+  preserved.preserveSSAForm();
+  return PassResult::changedIR(std::move(preserved));
+}
 
 } // namespace svm::ir
-
-SVM_REGISTER_FUNCTION_PASS("mem2reg", svm::ir::Mem2RegPass)

@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <variant>
 
 namespace svm::ir {
 namespace {
@@ -34,13 +35,11 @@ void noteTiming(PassContext &context, const char *unit, std::string_view pass,
 }
 
 template <typename Pass>
-std::string validatedPassName(const Pass *pass, DiagnosticEngine *diagnostics) {
+void validatePass(const Pass *pass, DiagnosticEngine *diagnostics) {
   if (!pass)
     failPassManager(diagnostics, "PassManager不能添加空Pass.");
-  const std::string_view name = pass->name();
-  if (name.empty())
+  if (pass->name().empty())
     failPassManager(diagnostics, "PassManager不能添加无名Pass.");
-  return std::string(name);
 }
 
 #ifndef NDEBUG
@@ -117,263 +116,114 @@ bool verifyDominance(Function *function) {
 }
 #endif
 
-template <typename Pass>
-const char *passValidationError(const Pass *pass, std::string_view registered) {
-  if (!pass)
-    return "pass factory returned null";
-  if (pass->name().empty())
-    return "pass factory returned an unnamed pass";
-  if (pass->name() != registered)
-    return "registered name does not match pass instance name";
-  return nullptr;
-}
-
 } // namespace
-
-void PassOptions::set(std::string key, std::string value) {
-  options_[std::move(key)] = std::move(value);
-}
-
-void PassOptions::setInt(std::string key, i32 value) {
-  set(std::move(key), std::to_string(value));
-}
-
-bool PassOptions::has(std::string_view key) const {
-  return options_.find(std::string(key)) != options_.end();
-}
-
-std::string PassOptions::getString(std::string_view key,
-                                   std::string fallback) const {
-  const auto found = options_.find(std::string(key));
-  return found == options_.end() ? std::move(fallback) : found->second;
-}
-
-i32 PassOptions::getInt(std::string_view key, i32 fallback) const {
-  const auto found = options_.find(std::string(key));
-  return found == options_.end() ? fallback : std::stoi(found->second);
-}
-
-bool PassOptions::getBool(std::string_view key, bool fallback) const {
-  const auto found = options_.find(std::string(key));
-  if (found == options_.end())
-    return fallback;
-  return found->second == "1" || found->second == "true";
-}
-
-PreservedAnalyses PreservedAnalyses::all() noexcept {
-  PreservedAnalyses result;
-  result.all_ = true;
-  return result;
-}
-
-PreservedAnalyses PreservedAnalyses::none() noexcept { return {}; }
-
-void PreservedAnalyses::preserve(const AnalysisKey *key) {
-  preserved_.insert(key);
-}
-
-bool PreservedAnalyses::preserves(const AnalysisKey *key) const noexcept {
-  return all_ || preserved_.find(key) != preserved_.end();
-}
 
 void PassContext::invalidate(Function *function,
                              const PreservedAnalyses &preserved) {
+  assert(function && function->module == &module_);
   functionAnalyses_.invalidate(function, preserved);
-  if (module_ && !preserved.preservesAllModuleAnalyses())
-    moduleAnalyses_.invalidate(module_, preserved);
+  if (!preserved.preservesAllModuleAnalyses())
+    moduleAnalyses_.invalidate(&module_, preserved);
 }
 
 void PassContext::invalidate(Module *module, const PreservedAnalyses &preserved,
                              const std::vector<Function *> &affectedFunctions) {
-  moduleAnalyses_.invalidate(module, preserved);
+  assert(module == &module_);
+  UNUSED(module);
+  moduleAnalyses_.invalidate(&module_, preserved);
   if (preserved.preservesAllFunctionAnalyses())
     return;
   if (affectedFunctions.empty()) {
     invalidateAllFunctions(preserved);
     return;
   }
-  for (Function *function : affectedFunctions)
-    if (function && !function->isExtern)
-      functionAnalyses_.invalidate(function, preserved);
+  // affectedFunctions按协议只包含存活函数 这里只将地址作为缓存键
+  for (Function *affected : affectedFunctions)
+    functionAnalyses_.invalidate(affected, preserved);
 }
 
 void PassContext::invalidateModuleAnalyses(const PreservedAnalyses &preserved) {
-  if (module_)
-    moduleAnalyses_.invalidate(module_, preserved);
+  if (!preserved.preservesAllModuleAnalyses())
+    moduleAnalyses_.invalidate(&module_, preserved);
 }
 
 void PassContext::invalidateAllFunctions(const PreservedAnalyses &preserved) {
-  for (Function *function = module_ ? module_->functionHead : nullptr; function;
+  for (Function *function = module_.functionHead; function;
        function = function->next)
     if (!function->isExtern)
       functionAnalyses_.invalidate(function, preserved);
 }
 
-void PassContext::notifyFunctionErased(Function *function) {
+void PassContext::notifyFunctionTopologyChanged(Function *function) {
+  assert(function && function->module == &module_);
   functionAnalyses_.clear(function);
   invalidateModuleAnalyses();
-}
-
-void PassContext::notifyFunctionAdded(Function *function) {
-  functionAnalyses_.clear(function);
-  invalidateModuleAnalyses();
-}
-
-bool PassRegistry::registerPass(PassDescriptor descriptor) {
-  if (descriptor.name.empty())
-    fail("cannot register a pass with an empty name", descriptor.name);
-  const bool validModule = descriptor.kind == PassKind::Module &&
-                           descriptor.createModule &&
-                           !descriptor.createFunction;
-  const bool validFunction = descriptor.kind == PassKind::Function &&
-                             descriptor.createFunction &&
-                             !descriptor.createModule;
-  if (!validModule && !validFunction)
-    fail("pass kind and factory do not agree", descriptor.name);
-  const std::string name = descriptor.name;
-  const bool inserted =
-      descriptors().emplace(name, std::move(descriptor)).second;
-  if (!inserted)
-    fail("duplicate pass registration", name);
-  return true;
-}
-
-const PassDescriptor *PassRegistry::lookup(std::string_view name) {
-  const auto found = descriptors().find(std::string(name));
-  return found == descriptors().end() ? nullptr : &found->second;
-}
-
-std::unique_ptr<FunctionPass>
-PassRegistry::createFunction(std::string_view name,
-                             const PassOptions &options) {
-  const PassDescriptor *descriptor = lookup(name);
-  if (!descriptor || descriptor->kind != PassKind::Function ||
-      !descriptor->createFunction || descriptor->createModule)
-    fail("not a registered function pass", name);
-  std::unique_ptr<FunctionPass> pass = descriptor->createFunction(options);
-  if (const char *reason = passValidationError(pass.get(), name))
-    fail(reason, name);
-  return pass;
-}
-
-std::unique_ptr<ModulePass>
-PassRegistry::createModule(std::string_view name, const PassOptions &options) {
-  const PassDescriptor *descriptor = lookup(name);
-  if (!descriptor || descriptor->kind != PassKind::Module ||
-      !descriptor->createModule || descriptor->createFunction)
-    fail("not a registered module pass", name);
-  std::unique_ptr<ModulePass> pass = descriptor->createModule(options);
-  if (const char *reason = passValidationError(pass.get(), name))
-    fail(reason, name);
-  return pass;
-}
-
-[[noreturn]] void PassRegistry::fail(const char *reason,
-                                     std::string_view name) {
-  std::fprintf(stderr, "[PassRegistry] fatal: %s: '%.*s'\n", reason,
-               static_cast<int>(name.size()), name.data());
-  std::abort();
-}
-
-std::unordered_map<std::string, PassDescriptor> &PassRegistry::descriptors() {
-  static std::unordered_map<std::string, PassDescriptor> value;
-  return value;
 }
 
 struct PassManager::Step {
-  std::string name;                       // 插桩使用的Pass
-  PassKind kind = PassKind::Function;     // Pass运行层级
-  std::unique_ptr<ModulePass> module;     // 模块Pass实例
-  std::unique_ptr<FunctionPass> function; // 函数Pass实例
-};
-
-struct PassManager::Instrumentation {
-  explicit Instrumentation(const PassOptions &options)
-      : disable(options.getString("disable-pass")),
-        filterFunction(options.getString("filter-function")),
-        stopBefore(options.getString("stop-before")),
-        stopAfter(options.getString("stop-after")),
-        printBefore(options.getString("print-before")),
-        printAfter(options.getString("print-after")),
-        timePasses(options.getBool("time-passes")) {}
-
-  bool enabled(std::string_view pass) const noexcept {
-    return disable.empty() || disable != pass;
+  using Storage =
+      std::variant<std::unique_ptr<ModulePass>, std::unique_ptr<FunctionPass>>;
+  explicit Step(std::unique_ptr<ModulePass> pass) : pass(std::move(pass)) {}
+  explicit Step(std::unique_ptr<FunctionPass> pass) : pass(std::move(pass)) {}
+  std::string_view name() const noexcept {
+    return std::visit([](const auto &pass) { return pass->name(); }, pass);
   }
-
-  bool filterMatches(const Function *function) const noexcept {
-    return filterFunction.empty() ||
-           (function && function->name && filterFunction == function->name);
-  }
-
-  std::string disable;        // 禁用的Pass
-  std::string filterFunction; // 插桩限定的函数名
-  std::string stopBefore;     // 执行前停止的Pass
-  std::string stopAfter;      // 执行后停止的Pass
-  std::string printBefore;    // 执行前打印的Pass
-  std::string printAfter;     // 执行后打印的Pass
-  bool timePasses = false;    // 是否统计Pass时间
+  Storage pass;
 };
 
 PassManager::PassManager(DiagnosticEngine *diagnostics)
     : diagnostics_(diagnostics) {
-  functionAnalyses_.linkModuleAnalyses(&moduleAnalyses_);
-  moduleAnalyses_.linkFunctionAnalyses(&functionAnalyses_);
+  linkAnalysisManagers(moduleAnalyses_, functionAnalyses_);
 }
 
 PassManager::~PassManager() = default;
 
 void PassManager::addPass(std::unique_ptr<ModulePass> pass) {
-  std::string name = validatedPassName(pass.get(), diagnostics_);
-  steps_.push_back(
-      {std::move(name), PassKind::Module, std::move(pass), nullptr});
+  if (aborted_)
+    return;
+  validatePass(pass.get(), diagnostics_);
+  steps_.emplace_back(std::move(pass));
 }
 
 void PassManager::addPass(std::unique_ptr<FunctionPass> pass) {
-  std::string name = validatedPassName(pass.get(), diagnostics_);
-  steps_.push_back(
-      {std::move(name), PassKind::Function, nullptr, std::move(pass)});
-}
-
-void PassManager::addPass(std::string_view name) {
-  const PassDescriptor *descriptor = PassRegistry::lookup(name);
-  if (!descriptor)
-    failPassManager(diagnostics_,
-                    "PassManager找不到'" + std::string(name) + "'Pass.");
-  if (descriptor->kind == PassKind::Module)
-    addPass(PassRegistry::createModule(name, options_));
-  else
-    addPass(PassRegistry::createFunction(name, options_));
+  if (aborted_)
+    return;
+  validatePass(pass.get(), diagnostics_);
+  steps_.emplace_back(std::move(pass));
 }
 
 bool PassManager::run(Module *module) {
   if (!module)
     return false;
-  if (!diagnostics_)
-    diagnostics_ = module->diagnostics;
-  else if (!module->diagnostics)
+  // 第二次运行先丢弃上一轮缓存 防止历史IR地址持续驻留
+  const bool hasPreviousRun = context_.has_value();
+  context_.reset();
+  if (hasPreviousRun) {
+    moduleAnalyses_.clear();
+    functionAnalyses_.clear();
+  }
+  if (!module->diagnostics)
     module->diagnostics = diagnostics_;
-  moduleAnalyses_.linkDiagnostics(diagnostics_);
-  functionAnalyses_.linkDiagnostics(diagnostics_);
-  context_ = std::make_unique<PassContext>(
-      module, moduleAnalyses_, functionAnalyses_, options_, output_);
-  Instrumentation instrumentation(options_);
+  context_.emplace(*module, moduleAnalyses_, functionAnalyses_);
   bool changed = false;
-  halted_ = false;
 
   for (Step &step : steps_) {
-    if (halted_)
-      break;
-    if (!instrumentation.enabled(step.name))
+    const std::string_view name = step.name();
+    if (options_.isDisabled(name))
       continue;
-    if (!instrumentation.stopBefore.empty() &&
-        instrumentation.stopBefore == step.name) {
-      halted_ = true;
-      break;
-    }
-    changed |= step.kind == PassKind::Module
-                   ? runModuleStep(step, module, *context_, instrumentation)
-                   : runFunctionStep(step, module, *context_, instrumentation);
+    options_.runPreHooks(name, module);
+    PassResult result = std::visit(
+        [&](auto &pass) -> PassResult {
+          using PassPtr = std::decay_t<decltype(pass)>;
+          if constexpr (std::is_same_v<PassPtr, std::unique_ptr<ModulePass>>)
+            return runModuleStep(*pass, module, *context_);
+          else
+            return runFunctionStep(*pass, module, *context_,
+                                   options_.hasHooks(name));
+        },
+        step.pass);
+    changed |= result.changed;
+    options_.runHooks(name, module, result);
   }
   return changed;
 }
@@ -384,86 +234,59 @@ PassContext &PassManager::context() {
   return *context_;
 }
 
-void PassManager::maybePrint(Module *module, std::string_view selected,
-                             std::string_view pass, const char *tag) const {
-  if (printHook_ && !selected.empty() && selected == pass)
-    printHook_(module, tag);
-}
-
-bool PassManager::runModuleStep(Step &step, Module *module,
-                                PassContext &context,
-                                const Instrumentation &instrumentation) {
-  maybePrint(module, instrumentation.printBefore, step.name,
-             "before-module-pass");
-  std::vector<std::pair<Function *, IRPhase>> oldPhases;
-  for (Function *function = module->functionHead; function;
-       function = function->next)
-    if (!function->isExtern)
-      oldPhases.emplace_back(function, function->phase);
-
+PassResult PassManager::runModuleStep(ModulePass &pass, Module *module,
+                                      PassContext &context) {
   const auto start = Clock::now();
-  PassResult result = step.module->run(module, context);
-  if (instrumentation.timePasses)
-    noteTiming(context, "module", step.name, elapsedMicros(start));
+  PassResult result = pass.run(module, context);
+  if (options_.timePasses())
+    noteTiming(context, "module", pass.name(), elapsedMicros(start));
 
   if (result.changed)
     context.invalidate(module, result.preserved, result.affectedFunctions);
-  for (const auto &[function, oldPhase] : oldPhases)
-    if (function->phase != oldPhase)
-      functionAnalyses_.clear(function);
 #ifndef NDEBUG
   for (Function *function = module->functionHead; function;
        function = function->next)
     assert(verifyDominance(function));
 #endif
-  maybePrint(module, instrumentation.printAfter, step.name,
-             "after-module-pass");
-  if (!instrumentation.stopAfter.empty() &&
-      instrumentation.stopAfter == step.name)
-    halted_ = true;
-  return result.changed;
+  return result;
 }
 
-bool PassManager::runFunctionStep(Step &step, Module *module,
-                                  PassContext &context,
-                                  const Instrumentation &instrumentation) {
-  bool changed = false;
+PassResult PassManager::runFunctionStep(FunctionPass &pass, Module *module,
+                                        PassContext &context,
+                                        bool collectAffectedFunctions) {
+  PassResult aggregate = PassResult::noChange();
   const auto sweepStart = Clock::now();
   for (Function *function = module->functionHead; function;
        function = function->next) {
-    if (!function->isExtern && function->region) {
-      const bool selected = instrumentation.filterMatches(function);
-      if (selected)
-        maybePrint(module, instrumentation.printBefore, step.name,
-                   "before-function-pass");
+    if (!function->isExtern && function->region &&
+        !options_.isBypassed(function)) {
       const IRPhase oldPhase = function->phase;
       const auto start = Clock::now();
-      PassResult result = step.function->run(function, context);
-      if (instrumentation.timePasses)
+      PassResult result = pass.run(function, context);
+      if (options_.timePasses())
         noteTiming(context, function->name ? function->name : "<anonymous>",
-                   step.name, elapsedMicros(start));
+                   pass.name(), elapsedMicros(start));
+      aggregate.preserved.intersect(result.preserved);
       if (result.changed) {
-        changed = true;
-        context.invalidate(function, result.preserved);
+        aggregate.changed = true;
+        if (collectAffectedFunctions)
+          aggregate.affectedFunctions.push_back(function);
+        // 函数扫描期间只失效当前函数 模块分析在扫描完成后统一处理
+        functionAnalyses_.invalidate(function, result.preserved);
       }
       if (function->phase != oldPhase)
         functionAnalyses_.clear(function);
 #ifndef NDEBUG
       assert(verifyDominance(function));
 #endif
-      if (selected)
-        maybePrint(module, instrumentation.printAfter, step.name,
-                   "after-function-pass");
-      if (!instrumentation.stopAfter.empty() &&
-          instrumentation.stopAfter == step.name && selected) {
-        halted_ = true;
-        break;
-      }
     }
   }
-  if (instrumentation.timePasses)
-    noteTiming(context, "function-sweep", step.name, elapsedMicros(sweepStart));
-  return changed;
+  if (aggregate.changed)
+    context.invalidateModuleAnalyses(aggregate.preserved);
+  if (options_.timePasses())
+    noteTiming(context, "function-sweep", pass.name(),
+               elapsedMicros(sweepStart));
+  return aggregate;
 }
 
 } // namespace svm::ir

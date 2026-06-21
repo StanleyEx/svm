@@ -1,4 +1,4 @@
-#include "PassManager.h"
+#include "HIRPass.h"
 #include "Utils.h"
 
 #include <limits>
@@ -9,12 +9,6 @@
 
 namespace svm::ir {
 namespace {
-
-class RaiseToFor final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "raise-to-for"; }
-  PassResult run(Function *function, PassContext &context) override;
-};
 
 struct CondInfo {
   OpCode comparison = OP_NE; // 规范化为IV在左侧的比较
@@ -563,6 +557,10 @@ bool tryRaise(Function *function, Inst *loop) {
   return true;
 }
 
+} // namespace
+
+std::string_view RaiseToFor::name() const noexcept { return "raise-to-for"; }
+
 PassResult RaiseToFor::run(Function *function, PassContext &) {
   if (!function || function->isExtern || function->phase != IRPhase::HIR)
     return PassResult::noChange();
@@ -579,7 +577,4 @@ PassResult RaiseToFor::run(Function *function, PassContext &) {
   return changed ? PassResult::changedIR() : PassResult::noChange();
 }
 
-} // namespace
 } // namespace svm::ir
-
-SVM_REGISTER_FUNCTION_PASS("raise-to-for", svm::ir::RaiseToFor)

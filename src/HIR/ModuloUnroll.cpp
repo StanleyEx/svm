@@ -1,5 +1,5 @@
 #include "DeepCopy.h"
-#include "PassManager.h"
+#include "HIRPass.h"
 
 #include <algorithm>
 #include <iterator>
@@ -13,12 +13,6 @@ namespace {
 
 constexpr i32 kMaxUnroll = 8;       // 最大展开倍数
 constexpr usize kMaxExpanded = 250; // 主体加尾循环的总代码预算
-
-class ModuloUnroll final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "modulo-unroll"; }
-  PassResult run(Function *function, PassContext &) override;
-};
 
 usize countInstructions(Region *region) noexcept {
   usize count = 0;
@@ -457,6 +451,10 @@ void transform(Function *function, const Plan &plan) {
   UNUSED(erasedBody);
 }
 
+} // namespace
+
+std::string_view ModuloUnroll::name() const noexcept { return "modulo-unroll"; }
+
 PassResult ModuloUnroll::run(Function *function, PassContext &) {
   if (!function || function->isExtern || function->phase != IRPhase::HIR ||
       !function->region)
@@ -484,7 +482,4 @@ PassResult ModuloUnroll::run(Function *function, PassContext &) {
   return changed ? PassResult::changedIR() : PassResult::noChange();
 }
 
-} // namespace
 } // namespace svm::ir
-
-SVM_REGISTER_FUNCTION_PASS("modulo-unroll", svm::ir::ModuloUnroll)

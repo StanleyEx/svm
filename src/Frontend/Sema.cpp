@@ -765,7 +765,7 @@ ExprNode *Sema::checkCall(CallExpr *callExpr) {
     auto newArgs = arena_.createArray<ExprNode *>(1);
     newArgs[0] = arena_.create<IntLiteralExpr>(
         callExpr->getLocation(),
-        static_cast<int32_t>(callExpr->getLocation().line));
+        static_cast<i32>(callExpr->getLocation().line));
     callExpr->args = newArgs;
     callExpr->argCount = 1;
   }

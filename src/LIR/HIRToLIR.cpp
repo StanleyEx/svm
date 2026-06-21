@@ -1,5 +1,5 @@
 #include "IR.h"
-#include "PassManager.h"
+#include "LIRPass.h"
 
 #include <cassert>
 #include <limits>
@@ -32,15 +32,14 @@ private:
   IRBuilder *builder_ = nullptr;
 };
 
-class HIRToLIRPass final : public ModulePass {
-public:
-  std::string_view name() const noexcept override { return "hir-to-lir"; }
-  PassResult run(Module *module, PassContext &) override {
-    return HIRToLIR().run(module) ? PassResult::changedIR()
-                                  : PassResult::noChange();
-  }
-};
 } // namespace
+
+std::string_view HIRToLIRPass::name() const noexcept { return "hir-to-lir"; }
+
+PassResult HIRToLIRPass::run(Module *module, PassContext &) {
+  return HIRToLIR().run(module) ? PassResult::changedIR()
+                                : PassResult::noChange();
+}
 
 bool HIRToLIR::run(Module *module) {
   if (!module)
@@ -354,5 +353,3 @@ void HIRToLIR::appendJumpIfOpen(BasicBlock *block, BasicBlock *target) {
   builder_->emitJump(target);
 }
 } // namespace svm::ir
-
-SVM_REGISTER_MODULE_PASS("hir-to-lir", svm::ir::HIRToLIRPass)
