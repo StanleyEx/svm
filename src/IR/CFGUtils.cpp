@@ -412,12 +412,8 @@ bool CFGEditor::movePhiEdgeValues(BasicBlock *succ, BasicBlock *oldPred,
 
 void CFGEditor::dropIncomingForRemovedEdge(Function *function, BasicBlock *pred,
                                            BasicBlock *succ) {
-  const bool removedValues = removePhiEdgeValues(function, succ, pred);
-  assert(removedValues || !succ->phiFirst_);
-  const bool removedPred = erasePredecessorSlot(succ, pred);
-  assert(removedPred);
-  UNUSED(removedValues);
-  UNUSED(removedPred);
+  VERIFY(removePhiEdgeValues(function, succ, pred) || !succ->phiFirst_);
+  VERIFY(erasePredecessorSlot(succ, pred));
 }
 
 bool CFGEditor::hasSemanticEdge(BasicBlock *pred, BasicBlock *succ) {
@@ -501,13 +497,9 @@ bool CFGEditor::redirectEdge(Function *function, BasicBlock *pred,
   if (!collectPhiPlan(newSucc, values, plan, true))
     return false;
 
-  const bool rewritten = rewriteSuccessorEdges(pred, oldSucc, newSucc);
-  assert(rewritten);
-  UNUSED(rewritten);
+  VERIFY(rewriteSuccessorEdges(pred, oldSucc, newSucc));
   dropIncomingForRemovedEdge(function, pred, oldSucc);
-  const bool added = addPhiEdgeValues(function, newSucc, pred, values);
-  assert(added);
-  UNUSED(added);
+  VERIFY(addPhiEdgeValues(function, newSucc, pred, values));
   assert(hasConsistentIncomingState(oldSucc));
   assert(hasConsistentIncomingState(newSucc));
   return true;
@@ -559,11 +551,8 @@ BasicBlock *CFGEditor::splitCriticalEdge(Function *function, BasicBlock *pred,
     builder.emitJump(succ);
   }
 
-  const bool rewritten = rewriteSuccessorEdges(pred, succ, middle);
-  const bool moved = movePhiEdgeValues(succ, pred, middle);
-  assert(rewritten && moved);
-  UNUSED(rewritten);
-  UNUSED(moved);
+  VERIFY(rewriteSuccessorEdges(pred, succ, middle));
+  VERIFY(movePhiEdgeValues(succ, pred, middle));
   appendPredecessorSlot(function, middle, pred);
   assert(hasConsistentIncomingState(middle));
   assert(hasConsistentIncomingState(succ));
@@ -630,11 +619,8 @@ CFGEditor::splitBlockPredecessors(Function *function, BasicBlock *succ,
   std::vector<BasicBlock *> middlePreds(preds, preds + predCount);
   assignPredecessors(function, middle, middlePreds);
 
-  for (u32 i = 0; i < predCount; ++i) {
-    const bool rewritten = rewriteSuccessorEdges(preds[i], succ, middle);
-    assert(rewritten);
-    UNUSED(rewritten);
-  }
+  for (u32 i = 0; i < predCount; ++i)
+    VERIFY(rewriteSuccessorEdges(preds[i], succ, middle));
 
   std::vector<BasicBlock *> succPreds;
   succPreds.reserve(succ->predecessorCount_ - predCount + 1);
@@ -649,12 +635,10 @@ CFGEditor::splitBlockPredecessors(Function *function, BasicBlock *succ,
     if (!plan.allSame) {
       Inst *splitPhi = builder.emitPhi(plan.phi->getType(), middle,
                                        builder.makeUndef(plan.phi->getType()));
-      for (u32 i = 0; i < predCount; ++i) {
-        const bool set = setPhiIncomingValueSlot(function, splitPhi, preds[i],
-                                                 plan.values[i]);
-        assert(set);
-        UNUSED(set);
-      }
+      for (u32 i = 0; i < predCount; ++i)
+        VERIFY(setPhiIncomingValueSlot(function, splitPhi, preds[i],
+                                       plan.values[i]));
+
       merged = splitPhi;
       result.createdPhi = true;
     }
@@ -718,9 +702,7 @@ bool CFGEditor::foldTerminatorToJump(Function *function, BasicBlock *pred,
   for (BasicBlock *succ : oldSuccessors)
     if (succ != kept)
       dropIncomingForRemovedEdge(function, pred, succ);
-  const bool rewritten = rewriteTerminatorToJump(function, pred, kept);
-  assert(rewritten);
-  UNUSED(rewritten);
+  VERIFY(rewriteTerminatorToJump(function, pred, kept));
   for (BasicBlock *succ : oldSuccessors) {
     assert(hasConsistentIncomingState(succ));
     UNUSED(succ);
@@ -775,11 +757,8 @@ bool CFGEditor::bypassTrivialBlock(Function *function, BasicBlock *middle) {
       newTargetPreds.size() > std::numeric_limits<u16>::max())
     return false;
 
-  for (BasicBlock *pred : preds) {
-    const bool rewritten = rewriteSuccessorEdges(pred, middle, target);
-    assert(rewritten);
-    UNUSED(rewritten);
-  }
+  for (BasicBlock *pred : preds)
+    VERIFY(rewriteSuccessorEdges(pred, middle, target));
 
   assignPredecessors(function, target, newTargetPreds);
 
@@ -838,9 +817,7 @@ bool CFGEditor::mergeBlockIntoPredecessor(Function *function, BasicBlock *pred,
   // 指令搬迁不改变边上的值 只需把后继中的incoming身份由succ改名为pred
   // 对应operand Use保持不变
   for (BasicBlock *target : oldSuccessors) {
-    const bool moved = movePhiEdgeValues(target, succ, pred);
-    assert(moved);
-    UNUSED(moved);
+    VERIFY(movePhiEdgeValues(target, succ, pred));
     assert(hasConsistentIncomingState(target));
   }
   return true;

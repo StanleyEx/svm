@@ -267,14 +267,9 @@ bool transform(Function *function) {
     // Return -> Continue
     builder.replaceInPlace(tail.ret, OP_CONTINUE, TY_VOID);
     // 失去了Return的Use-Def边后 删除尾调用和包装指令
-    if (tail.wrapper) {
-      const bool erased = tail.wrapper->eraseFromBlock();
-      assert(erased);
-      UNUSED(erased);
-    }
-    const bool erased = tail.call->eraseFromBlock();
-    assert(erased);
-    UNUSED(erased);
+    if (tail.wrapper)
+      VERIFY(tail.wrapper->eraseFromBlock());
+    VERIFY(tail.call->eraseFromBlock());
   }
 
   // Modulo TCO模式 在循环体尾部把累加器/累乘器的值写回所有BaseReturn的返回值

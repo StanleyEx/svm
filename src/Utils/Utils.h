@@ -69,6 +69,14 @@ constexpr i32 i32MulWrap(i32 left, i32 right) noexcept {
   return i32FromBits(static_cast<u32>(left) * static_cast<u32>(right));
 }
 
-#define UNUSED(x) (void)(x)
+#define VERIFY(expr, ...)                                                      \
+  ([&](const char *__msg = "operation should succeed") noexcept(               \
+       noexcept(expr)) -> decltype(auto) {                                     \
+    decltype(auto) __v = (expr);                                               \
+    assert(__v && __msg);                                                      \
+    return __v;                                                                \
+  }(__VA_ARGS__))
+
+#define UNUSED(expr) (void)(expr)
 
 #endif // TYPES_H

@@ -90,9 +90,7 @@ void HIRToLIR::hoistAllocas(Function *function) {
     hoisted->getMem() = alloca->getMem();
     hoisted->sourceLocation = alloca->sourceLocation;
     replaceAllUsesWith(function, alloca, hoisted);
-    const bool erased = alloca->eraseFromBlock();
-    assert(erased);
-    UNUSED(erased);
+    VERIFY(alloca->eraseFromBlock());
   }
 }
 
@@ -138,9 +136,7 @@ void HIRToLIR::materializeLocalInitializers(Function *function) {
       }
     }
     base->getMem().initInfo = nullptr;
-    const bool erased = anchor->eraseFromBlock();
-    assert(erased);
-    UNUSED(erased);
+    VERIFY(anchor->eraseFromBlock());
   }
 }
 

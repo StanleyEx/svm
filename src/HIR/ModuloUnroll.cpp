@@ -443,12 +443,8 @@ void transform(Function *function, const Plan &plan) {
 
   builder.setInsertBefore(loop);
   builder.emitIf(hasIterations, thenRegion);
-  const bool erased = loop->eraseFromBlock();
-  assert(erased);
-  UNUSED(erased);
-  const bool erasedBody = builder.eraseRegionContents(oldBody);
-  assert(erasedBody);
-  UNUSED(erasedBody);
+  VERIFY(loop->eraseFromBlock());
+  VERIFY(builder.eraseRegionContents(oldBody));
 }
 
 } // namespace
