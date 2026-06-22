@@ -1,6 +1,7 @@
 #ifndef TYPES_H
 #define TYPES_H
 
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,16 @@ using isize = std::ptrdiff_t;
 
 using uintptr = std::uintptr_t;
 using intptr = std::intptr_t;
+
+// 返回无符号值的有效位数 零的有效位数为零
+constexpr u32 bitWidth(u64 value) noexcept {
+  u32 width = 0;
+  while (value != 0) {
+    ++width;
+    value >>= 1;
+  }
+  return width;
+}
 
 template <typename Float,
           std::enable_if_t<std::is_floating_point_v<Float>, int> = 0>
@@ -71,15 +82,16 @@ constexpr i32 i32MulWrap(i32 left, i32 right) noexcept {
   return i32FromBits(static_cast<u32>(left) * static_cast<u32>(right));
 }
 
+#define UNUSED(expr) (void)(expr)
+
 #define VERIFY(expr, ...)                                                      \
   ([&](const char *__msg = "operation should succeed") noexcept(               \
        noexcept(expr)) -> decltype(auto) {                                     \
     decltype(auto) __v = (expr);                                               \
+    UNUSED(__msg);                                                             \
     assert(__v && __msg);                                                      \
     return __v;                                                                \
   }(__VA_ARGS__))
-
-#define UNUSED(expr) (void)(expr)
 
 } // namespace svm
 
