@@ -7,29 +7,10 @@
 
 namespace svm::ir {
 
-class HIRInstCombine final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override;
-  PassResult run(Function *function, PassContext &context) override;
-};
-
-class RaiseToFor final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override;
-  PassResult run(Function *function, PassContext &context) override;
-};
-
-class TCO final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override;
-  PassResult run(Function *function, PassContext &context) override;
-};
-
-class ModuloUnroll final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override;
-  PassResult run(Function *function, PassContext &context) override;
-};
+DECLARE_FUNCTION_PASS(HIRInstCombinePass);
+DECLARE_FUNCTION_PASS(RaiseToForPass);
+DECLARE_FUNCTION_PASS(TCOPass);
+DECLARE_FUNCTION_PASS(ModuloUnrollPass);
 
 class PrintHIR final : public ModulePass {
 public:

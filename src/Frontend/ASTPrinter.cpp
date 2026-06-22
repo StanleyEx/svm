@@ -61,14 +61,14 @@ void dumpToken(const Token &token, FILE *out) {
                  static_cast<double>(token.floatValue));
     break;
   case TokenKind::StringLiteral:
-    std::fprintf(out, "%u:%u\t%s\t", token.location.line,
-                 token.location.column, token.toString());
+    std::fprintf(out, "%u:%u\t%s\t", token.location.line, token.location.column,
+                 token.toString());
     putQuoted(out, token.text);
     std::fputc('\n', out);
     break;
   default:
-    std::fprintf(out, "%u:%u\t%s\n", token.location.line,
-                 token.location.column, token.toString());
+    std::fprintf(out, "%u:%u\t%s\n", token.location.line, token.location.column,
+                 token.toString());
     break;
   }
 }

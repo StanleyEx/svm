@@ -449,9 +449,11 @@ void transform(Function *function, const Plan &plan) {
 
 } // namespace
 
-std::string_view ModuloUnroll::name() const noexcept { return "modulo-unroll"; }
+std::string_view ModuloUnrollPass::name() const noexcept {
+  return "modulo-unroll";
+}
 
-PassResult ModuloUnroll::run(Function *function, PassContext &) {
+PassResult ModuloUnrollPass::run(Function *function, PassContext &) {
   if (!function || function->isExtern || function->phase != IRPhase::HIR ||
       !function->region)
     return PassResult::noChange();

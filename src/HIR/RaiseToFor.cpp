@@ -559,9 +559,11 @@ bool tryRaise(Function *function, Inst *loop) {
 
 } // namespace
 
-std::string_view RaiseToFor::name() const noexcept { return "raise-to-for"; }
+std::string_view RaiseToForPass::name() const noexcept {
+  return "raise-to-for";
+}
 
-PassResult RaiseToFor::run(Function *function, PassContext &) {
+PassResult RaiseToForPass::run(Function *function, PassContext &) {
   if (!function || function->isExtern || function->phase != IRPhase::HIR)
     return PassResult::noChange();
   std::vector<Inst *> loops;

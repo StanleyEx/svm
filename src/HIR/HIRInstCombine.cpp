@@ -82,11 +82,11 @@ Inst *foldGlobalLoad(Inst *load, IRBuilder &builder) {
 
 } // namespace
 
-std::string_view HIRInstCombine::name() const noexcept {
+std::string_view HIRInstCombinePass::name() const noexcept {
   return "hir-inst-combine";
 }
 
-PassResult HIRInstCombine::run(Function *function, PassContext &) {
+PassResult HIRInstCombinePass::run(Function *function, PassContext &) {
   if (!function || function->isExtern || function->phase != IRPhase::HIR)
     return PassResult::noChange();
   bool anyChanged = false;

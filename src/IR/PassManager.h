@@ -461,6 +461,20 @@ public:
   virtual std::string_view name() const noexcept = 0;
 };
 
+#define DECLARE_MODULE_PASS(PassName)                                          \
+  class PassName final : public ModulePass {                                   \
+  public:                                                                      \
+    std::string_view name() const noexcept override;                           \
+    PassResult run(Module *module, PassContext &context) override;             \
+  }
+
+#define DECLARE_FUNCTION_PASS(PassName)                                        \
+  class PassName final : public FunctionPass {                                 \
+  public:                                                                      \
+    std::string_view name() const noexcept override;                           \
+    PassResult run(Function *function, PassContext &context) override;         \
+  }
+
 class PassManager {
 public:
   explicit PassManager(DiagnosticEngine *diagnostics = nullptr);

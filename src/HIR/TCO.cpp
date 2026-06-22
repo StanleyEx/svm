@@ -291,9 +291,9 @@ bool transform(Function *function) {
 
 } // namespace
 
-std::string_view TCO::name() const noexcept { return "tco"; }
+std::string_view TCOPass::name() const noexcept { return "tco"; }
 
-PassResult TCO::run(Function *function, PassContext &) {
+PassResult TCOPass::run(Function *function, PassContext &) {
   return transform(function) ? PassResult::changedIR() : PassResult::noChange();
 }
 
