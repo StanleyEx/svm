@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+namespace svm {
 class Arena {
 private:
   static constexpr usize kAlignment = 16;
@@ -295,5 +296,7 @@ private:
   usize totalAllocated_ = 0;
   std::vector<std::function<void()>> destructors_;
 };
+
+} // namespace svm
 
 #endif // ARENA_H

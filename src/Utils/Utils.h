@@ -7,6 +7,8 @@
 #include <limits>
 #include <type_traits>
 
+namespace svm {
+
 using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
@@ -78,5 +80,7 @@ constexpr i32 i32MulWrap(i32 left, i32 right) noexcept {
   }(__VA_ARGS__))
 
 #define UNUSED(expr) (void)(expr)
+
+} // namespace svm
 
 #endif // TYPES_H
