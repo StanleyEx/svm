@@ -61,6 +61,7 @@ target_include_directories(svm_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Frontend
     ${CMAKE_CURRENT_SOURCE_DIR}/src/IR
     ${CMAKE_CURRENT_SOURCE_DIR}/src/LIR
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Backend
 )
 
 add_executable(svm ${MAIN_SOURCE})
