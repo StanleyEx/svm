@@ -324,7 +324,9 @@ u32 Inst::getSuccessorSlotCount() const noexcept {
   if (op_ == OP_SWITCH)
     return switch_ ? switch_->caseCount_ + 1 : 0;
   if (op_ == MOP_JT_DISPATCH)
-    return jumpTable_ ? jumpTable_->entryCount_ + 1 : 0;
+    // 越界路径由前置bounds-check直接跳往 default
+    // 表查找块只会间接跳到实际表项 因此defaultTarget_不是其额外CFG后继
+    return jumpTable_ ? jumpTable_->entryCount_ : 0;
   return 0;
 }
 BasicBlock *Inst::getSuccessorSlot(u32 index) const noexcept {
@@ -336,8 +338,8 @@ BasicBlock *Inst::getSuccessorSlot(u32 index) const noexcept {
   if (op_ == OP_SWITCH)
     return index < switch_->caseCount_ ? switch_->cases_[index].target_
                                        : switch_->defaultTarget_;
-  return index < jumpTable_->entryCount_ ? jumpTable_->target_[index]
-                                         : jumpTable_->defaultTarget_;
+  assert(op_ == MOP_JT_DISPATCH);
+  return jumpTable_->target_[index];
 }
 void Inst::setSuccessorSlot(u32 index, BasicBlock *target) noexcept {
   assert(index < getSuccessorSlotCount());
@@ -350,10 +352,9 @@ void Inst::setSuccessorSlot(u32 index, BasicBlock *target) noexcept {
       switch_->cases_[index].target_ = target;
     else
       switch_->defaultTarget_ = target;
-  } else if (index < jumpTable_->entryCount_) {
-    jumpTable_->target_[index] = target;
   } else {
-    jumpTable_->defaultTarget_ = target;
+    assert(op_ == MOP_JT_DISPATCH);
+    jumpTable_->target_[index] = target;
   }
 }
 Region *Inst::getBody() const noexcept {
@@ -708,6 +709,44 @@ JumpTable *Function::newJumpTable() {
   return table;
 }
 
+bool Function::ownsValue(const Inst *value) const noexcept {
+  if (!value || value->isErased() || value->arena != arena)
+    return false;
+  if (const BasicBlock *block = value->parentBlock()) {
+    const Region *parent = block->parentRegion;
+    return parent && parent->function == this;
+  }
+  for (u32 index = 0; index < paramCount; ++index)
+    if (params[index] == value)
+      return true;
+  if (module)
+    for (Inst *physical : module->physicalRegisterDefs)
+      if (physical == value)
+        return true;
+  if (value->isUndefValue())
+    return constPools.undefValues.count(value) != 0;
+  switch (value->getOp()) {
+  case OP_ICONST: {
+    const IConstKey key{value->getType(), value->getImm()};
+    const auto found = constPools.iConstPool.find(key);
+    return found != constPools.iConstPool.end() && found->second == value;
+  }
+  case OP_FCONST: {
+    u32 bits = 0;
+    const f32 immediate = value->getFimm();
+    std::memcpy(&bits, &immediate, sizeof(bits));
+    const auto found = constPools.fConstPool.find(bits);
+    return found != constPools.fConstPool.end() && found->second == value;
+  }
+  case OP_GETGLOBAL: {
+    const auto found = constPools.globalPtrPool.find(value->getGlobal());
+    return found != constPools.globalPtrPool.end() && found->second == value;
+  }
+  default:
+    return false;
+  }
+}
+
 void JumpTable::configure(Function *function, i32 newMinValue,
                           BasicBlock *newDefaultTarget,
                           BasicBlock *newBoundsCheckBlock,
@@ -808,6 +847,52 @@ Global *Module::newGlobal(const char *globalName, IRType elementType, u32 size,
     globalHead = global;
   globalTail = global;
   return global;
+}
+
+bool MachineDCE(Function *function) {
+  if (!function || function->phase != IRPhase::MIR ||
+      function->mirPhase != MIRPhase::SSA || function->isExtern ||
+      !function->region || !function->region->first)
+    return false;
+
+  computeUses(function);
+  bool changed = false;
+  bool roundChanged = true;
+  while (roundChanged) {
+    roundChanged = false;
+    for (BasicBlock *block = function->region->first; block;
+         block = block->next()) {
+      for (Inst *inst = block->lastInst(); inst;) {
+        Inst *previous = inst->previous();
+        const OpCode op = inst->getOp();
+        const bool sideEffect =
+            isMachineCall(op) || isMachineStore(op) || isMachineTerminator(op);
+        if (!sideEffect && inst->getType() != TY_VOID && inst->hasNoUses() &&
+            inst->eraseFromBlock()) {
+          changed = true;
+          roundChanged = true;
+        }
+        inst = previous;
+      }
+    }
+  }
+  return changed;
+}
+
+bool detachPhiAsVRegIdentity(Inst *phi) {
+  if (!phi || phi->op_ != OP_PHI || !phi->block_ || phi->erased_)
+    return false;
+  Function *function =
+      phi->block_->parentRegion ? phi->block_->parentRegion->function : nullptr;
+  if (!function || function->phase != IRPhase::MIR ||
+      function->mirPhase != MIRPhase::SSA)
+    return false;
+  // dropAllOperands只移除Phi对输入值的读取
+  // uses_链表示Phi结果的下游消费者 必须保留
+  phi->dropAllOperands();
+  phi->incoming_ = nullptr;
+  phi->unlinkFromBlock();
+  return true;
 }
 
 } // namespace svm::ir

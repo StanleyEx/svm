@@ -172,6 +172,53 @@ Inst *IRBuilder::replaceInPlace(Inst *victim, OpCode op, IRType type,
   return victim;
 }
 
+bool IRBuilder::canReplace(const Inst *victim) const noexcept {
+  if (!function_->ownsValue(victim) || !victim->parentBlock())
+    return false;
+  const OpCode op = victim->getOp();
+  return function_->phase == IRPhase::HIR ||
+         (!isLIRTerminator(op) && !isMachineTerminator(op));
+}
+
+bool IRBuilder::replace(Inst *victim, Inst *replacement) {
+  if (!victim || !replacement)
+    return false;
+  if (victim == replacement)
+    return !victim->isErased() && function_->ownsValue(victim);
+  if (!canReplace(victim) || !function_->ownsValue(replacement) ||
+      victim->getType() != replacement->getType())
+    return false;
+  for (u32 index = 0; index < replacement->getOperandCount(); ++index)
+    if (replacement->getArg(index) == victim)
+      return false;
+
+  replaceAllUsesWith(function_, victim, replacement);
+  const bool erased = victim->eraseFromBlock();
+  assert(erased && "IRBuilder::replace failed to erase victim");
+  return erased;
+}
+
+bool IRBuilder::replaceWithConst(Inst *victim, i32 value) {
+  if (!canReplace(victim))
+    return false;
+  Inst *constant = nullptr;
+  if (victim->getType() == TY_I1) {
+    if (value != 0 && value != 1)
+      return false;
+    constant = i1Const(value != 0);
+  } else if (victim->getType() == TY_I32) {
+    constant = iConst(value);
+  } else {
+    return false;
+  }
+  return replace(victim, constant);
+}
+
+bool IRBuilder::replaceWithConst(Inst *victim, f32 value) {
+  return canReplace(victim) && victim->getType() == TY_F32 &&
+         replace(victim, fConst(value));
+}
+
 Inst *IRBuilder::replaceWithJump(Inst *victim, BasicBlock *target) {
   assert(victim && target);
   const OpCode op = function_->phase == IRPhase::MIR ? MOP_J : OP_JMP;
@@ -204,11 +251,8 @@ void IRBuilder::eraseAfter(Inst *anchor) {
     dead.push_back(inst);
   for (Inst *inst : dead)
     inst->dropAllOperands();
-  for (Inst *inst : dead) {
-    const bool erased = inst->eraseFromBlock();
-    assert(erased);
-    UNUSED(erased);
-  }
+  for (Inst *inst : dead)
+    VERIFY(inst->eraseFromBlock());
 }
 
 bool IRBuilder::eraseRegionContents(Region *region) {
@@ -226,9 +270,7 @@ bool IRBuilder::eraseRegionContents(Region *region) {
   for (auto it = instructions.rbegin(); it != instructions.rend(); ++it) {
     if (!(*it)->parentBlock())
       continue;
-    const bool erased = (*it)->eraseFromBlock();
-    assert(erased);
-    UNUSED(erased);
+    VERIFY((*it)->eraseFromBlock());
   }
   region->owner = nullptr;
   region->parent = nullptr;
@@ -291,6 +333,7 @@ Inst *IRBuilder::makeUndef(IRType type) {
   Inst *inst = newInst(OP_ICONST, type, 0);
   inst->undefValue_ = true;
   inst->sourceLocation = nullptr;
+  function_->constPools.undefValues.insert(inst);
   return inst;
 }
 
@@ -631,6 +674,23 @@ Inst *IRBuilder::emitSwitch(Inst *selector, const SwitchCase *cases,
     assert(cases[index - 1].getValue() < cases[index].getValue());
 
   Inst *switchInst = emit(OP_SWITCH, TY_VOID, selector);
+  SwitchPayload &payload = switchInst->mutableSwitch();
+  payload.caseCount_ = caseCount;
+  payload.defaultTarget_ = defaultTarget;
+  payload.cases_ = function_->arena->createArray<SwitchCase>(caseCount);
+  if (caseCount)
+    std::memcpy(payload.cases_, cases, sizeof(SwitchCase) * caseCount);
+  return switchInst;
+}
+
+Inst *IRBuilder::replaceWithSwitch(Inst *victim, Inst *selector,
+                                   const SwitchCase *cases, u32 caseCount,
+                                   BasicBlock *defaultTarget) {
+  assert(victim && selector && defaultTarget && (caseCount == 0 || cases));
+  for (u32 index = 1; index < caseCount; ++index)
+    assert(cases[index - 1].getValue() < cases[index].getValue());
+
+  Inst *switchInst = replaceInPlace(victim, OP_SWITCH, TY_VOID, selector);
   SwitchPayload &payload = switchInst->mutableSwitch();
   payload.caseCount_ = caseCount;
   payload.defaultTarget_ = defaultTarget;

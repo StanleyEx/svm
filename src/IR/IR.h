@@ -9,6 +9,7 @@
 #include <cassert>
 #include <initializer_list>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace svm {
@@ -293,6 +294,46 @@ inline bool isIntArithmetic(OpCode op) noexcept {
 inline bool isIntCompare(OpCode op) noexcept {
   return op >= OP_EQ && op <= OP_GE;
 }
+inline OpCode invertIntCompare(OpCode op) noexcept {
+  switch (op) {
+  case OP_EQ:
+    return OP_NE;
+  case OP_NE:
+    return OP_EQ;
+  case OP_LT:
+    return OP_GE;
+  case OP_LE:
+    return OP_GT;
+  case OP_GT:
+    return OP_LE;
+  case OP_GE:
+    return OP_LT;
+  default:
+    return op;
+  }
+}
+inline OpCode swapCompareOperands(OpCode op) noexcept {
+  switch (op) {
+  case OP_LT:
+    return OP_GT;
+  case OP_LE:
+    return OP_GE;
+  case OP_GT:
+    return OP_LT;
+  case OP_GE:
+    return OP_LE;
+  case OP_FLT:
+    return OP_FGT;
+  case OP_FLE:
+    return OP_FGE;
+  case OP_FGT:
+    return OP_FLT;
+  case OP_FGE:
+    return OP_FLE;
+  default:
+    return op;
+  }
+}
 inline bool isFloatArithmetic(OpCode op) noexcept {
   return op >= OP_FADD && op <= OP_FNEG;
 }
@@ -363,6 +404,10 @@ inline bool isMachineFrameOp(OpCode op) noexcept {
 }
 inline bool isMachineCopy(OpCode op) noexcept {
   return op == MOP_COPY || op == MOP_FCOPY;
+}
+inline bool isMachineBooleanResult(OpCode op) noexcept {
+  return op == MOP_SLT || op == MOP_SEQZ || op == MOP_SNEZ || op == MOP_FEQ_S ||
+         op == MOP_FLT_S || op == MOP_FLE_S;
 }
 inline bool isMachineFloat(OpCode op) noexcept {
   return (op >= MOP_FLW && op <= MOP_F32_TO_GPR64) || op == MOP_FCOPY ||
@@ -680,6 +725,7 @@ public:
   friend bool computePreds(Function *function);
   friend void computeUses(Function *function);
   friend void replaceAllUsesWith(Function *function, Inst *from, Inst *to);
+  friend bool detachPhiAsVRegIdentity(Inst *phi);
 
 private:
   static constexpr usize kPayloadSize = 24; // Payload稳定大小
@@ -819,6 +865,7 @@ struct ConstPools {
   std::unordered_map<IConstKey, Inst *, IConstKeyHash> iConstPool;
   std::unordered_map<u32, Inst *> fConstPool;
   std::unordered_map<Global *, Inst *> globalPtrPool;
+  std::unordered_set<const Inst *> undefValues; // 本函数创建的未定义值
 };
 
 struct Function {
@@ -831,35 +878,36 @@ struct Function {
   };
 
   Arena *arena = nullptr;
-  Function *next = nullptr;             // 模块函数链表下一项
-  const char *name = nullptr;           // 函数名
-  Module *module = nullptr;             // 所属模块
-  Region *region = nullptr;             // 顶层Region
-  u32 paramCount = 0;                   // 形参数量
-  IRType *paramTypes = nullptr;         // 形参类型数组
-  Inst **params = nullptr;              // 形参值数组
-  IRType returnType = TY_VOID;          // 返回类型
-  ConstPools constPools;                // 常量驻留池
-  bool isExtern = false;                // 是否外部函数
-  FunctionType *functionType = nullptr; // 前端函数类型
-  u32 instCount = 0;                    // 指令编号计数
-  u32 blockCount = 0;                   // 块编号计数
-  IRPhase phase = IRPhase::HIR;         // 当前IR阶段
-  MIRPhase mirPhase = MIRPhase::NotMIR; // 当前MIR形态
-  u32 virtualRegisterCount = 0;         // 虚拟寄存器数
-  u8 *virtualRegisterClasses = nullptr; // 虚拟寄存器类别
-  std::vector<FrameSlot> frameSlots;    // 栈帧槽表
-  i32 stackSize = 0;                    // 栈帧大小
-  bool isLeaf = true;                   // 是否叶函数
-  u64 calleeSaveMask = 0;               // 被调用者保存掩码
-  i32 maxCallArgStack = 0;              // 最大出参栈空间
-  void *mirMoveInfo = nullptr;          // MIR移动侧表
-  void *mirVRegFlags = nullptr;         // MIR虚拟寄存器侧表
-  void *ipraInfo = nullptr;             // IPRA摘要
-  JumpTable *jumpTableHead = nullptr;   // 跳转表链表头
+  Function *next = nullptr;               // 模块函数链表下一项
+  const char *name = nullptr;             // 函数名
+  Module *module = nullptr;               // 所属模块
+  Region *region = nullptr;               // 顶层Region
+  u32 paramCount = 0;                     // 形参数量
+  IRType *paramTypes = nullptr;           // 形参类型数组
+  Inst **params = nullptr;                // 形参值数组
+  IRType returnType = TY_VOID;            // 返回类型
+  ConstPools constPools;                  // 常量驻留池
+  bool isExtern = false;                  // 是否外部函数
+  FunctionType *functionType = nullptr;   // 前端函数类型
+  u32 instCount = 0;                      // 指令编号计数
+  u32 blockCount = 0;                     // 块编号计数
+  IRPhase phase = IRPhase::HIR;           // 当前IR阶段
+  MIRPhase mirPhase = MIRPhase::NotMIR;   // 当前MIR形态
+  u32 virtualRegisterCount = 0;           // 虚拟寄存器数
+  std::vector<u8> virtualRegisterClasses; // 虚拟寄存器类别
+  std::vector<FrameSlot> frameSlots;      // 栈帧槽表
+  i32 stackSize = 0;                      // 栈帧大小
+  bool isLeaf = true;                     // 是否叶函数
+  u64 calleeSaveMask = 0;                 // 被调用者保存掩码
+  i32 maxCallArgStack = 0;                // 最大出参栈空间
+  void *mirMoveInfo = nullptr;            // MIR移动侧表
+  void *mirVRegFlags = nullptr;           // MIR虚拟寄存器侧表
+  void *ipraInfo = nullptr;               // IPRA摘要
+  JumpTable *jumpTableHead = nullptr;     // 跳转表链表头
 
   JumpTable *newJumpTable();                                       // 创建跳转表
   i32 newFrameSlot(i32 size, i32 alignment, FrameSlot::Kind kind); // 创建帧槽
+  bool ownsValue(const Inst *value) const noexcept;                // 判断值归属
 };
 
 struct Module {
@@ -943,6 +991,9 @@ public:
   Inst *replaceInPlace(Inst *victim, OpCode op, IRType type, Inst *arg0);
   Inst *replaceInPlace(Inst *victim, OpCode op, IRType type, Inst *arg0,
                        Inst *arg1);
+  bool replace(Inst *victim, Inst *replacement); // RAUW再删除旧指令
+  bool replaceWithConst(Inst *victim, i32 value);
+  bool replaceWithConst(Inst *victim, f32 value);
   Inst *castTo(Inst *value, IRType target);
   Inst *toI1(Inst *value);
   Coerced coercePair(Inst *left, Inst *right);
@@ -958,6 +1009,9 @@ public:
   Inst *emitWhile(Region *conditionRegion, Region *bodyRegion);
   Inst *emitSwitch(Inst *selector, const SwitchCase *cases, u32 caseCount,
                    BasicBlock *defaultTarget);
+  // 原地替换为Switch终结符
+  Inst *replaceWithSwitch(Inst *victim, Inst *selector, const SwitchCase *cases,
+                          u32 caseCount, BasicBlock *defaultTarget);
   Inst *cloneInst(const Inst *source);                     // 克隆单条指令
   Inst *replaceWithJump(Inst *victim, BasicBlock *target); // 替换为跳转
   Inst *replaceWithBranch(Inst *victim, Inst *condition, BasicBlock *trueBlock,
@@ -972,7 +1026,8 @@ private:
   void allocatePayload(Inst *inst);                          // 分配操作码载荷
   Inst *replaceHeader(Inst *victim, OpCode op, IRType type); // 重置指令头
   Inst *iConstImpl(i32 value, IRType type);                  // 获取整数常量
-  void attach(Inst *inst);                                   // 挂接指令
+  bool canReplace(const Inst *victim) const noexcept; // 判断是否可替换定义
+  void attach(Inst *inst);                            // 挂接指令
 
   Module *module_ = nullptr;                              // 当前模块
   Function *function_ = nullptr;                          // 当前函数
@@ -1033,6 +1088,10 @@ public:
   // 将单前驱块合入其前驱
   static bool mergeBlockIntoPredecessor(Function *function, BasicBlock *pred,
                                         BasicBlock *succ);
+  // 改写机器分支/跳转的物理后继槽 Lowering改变操作码后仍需保留CFG边
+  static bool rewriteBranchSlot(BasicBlock *pred, bool trueEdge,
+                                BasicBlock *newTarget);
+  static bool rewriteJumpTarget(BasicBlock *pred, BasicBlock *newTarget);
 
 private:
   // 删除死边元数据
@@ -1052,11 +1111,6 @@ private:
                                       BasicBlock *target);
   // 删除已断开活边的块
   static void eraseBlock(Function *function, BasicBlock *block);
-  // 改写分支物理槽
-  static bool rewriteBranchSlot(BasicBlock *pred, bool trueEdge,
-                                BasicBlock *newTarget);
-  // 改写跳转物理槽
-  static bool rewriteJumpTarget(BasicBlock *pred, BasicBlock *newTarget);
   // 一次性重建 Phi 槽
   static void rebuildPhiIncomingSlots(Function *function, Inst *phi,
                                       const std::vector<BasicBlock *> &preds,
@@ -1088,6 +1142,10 @@ private:
 
 void computeUses(Function *function); // 重建Use链 当作批量修复工具
 void replaceAllUsesWith(Function *function, Inst *from, Inst *to);
+// MIR阶段删除无副作用且无使用的机器指令 返回是否发生变化
+bool MachineDCE(Function *function);
+// 摘下块内Phi 保留其指令身份, 编号, 类型和使用链作为浮空虚拟寄存器
+bool detachPhiAsVRegIdentity(Inst *phi);
 const Inst *getEnclosingLoop(const Inst *inst) noexcept; // 查询最内层所属循环
 Inst *getEnclosingLoop(Inst *inst) noexcept;
 const Inst *getMemoryBase(const Inst *address) noexcept; // 寻址得到基对象
