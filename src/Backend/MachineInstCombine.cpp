@@ -88,7 +88,7 @@ bool tryRemPowerOfTwoZeroCompare(Inst *inst, IRBuilder &builder) {
     return false;
 
   builder.setInsertBefore(inst);
-  builder.setCurrentSourceLocation(inst->sourceLocation);
+  builder.setCurrentSourceLocation(remainder->sourceLocation);
   Inst *low = builder.emit(MOP_ANDI, TY_I32, remainder->getArg(0));
   low->setImm(i32FromBits(mask));
   site.consumer->setArg(0, low);
@@ -124,7 +124,7 @@ bool tryRemPowerOfTwoConstantCompare(Function *function, Inst *inst,
   if (compared >= 0 && static_cast<u32>(compared) < magnitude &&
       computeMachineValueFacts(input, query).knownNonNegativeI32()) {
     builder.setInsertBefore(inst);
-    builder.setCurrentSourceLocation(inst->sourceLocation);
+    builder.setCurrentSourceLocation(tested->sourceLocation);
     Inst *low = builder.emit(MOP_ANDI, TY_I32, input);
     low->setImm(i32FromBits(mask));
     if (compared == 0) {
@@ -135,7 +135,7 @@ bool tryRemPowerOfTwoConstantCompare(Function *function, Inst *inst,
     }
   } else if (magnitude == 2 && (compared == 1 || compared == -1)) {
     builder.setInsertBefore(inst);
-    builder.setCurrentSourceLocation(inst->sourceLocation);
+    builder.setCurrentSourceLocation(tested->sourceLocation);
     Inst *zero = function->module->physicalRegister(rv64::ZERO);
     Inst *odd = builder.emit(MOP_ANDI, TY_I32, input);
     odd->setImm(1);
@@ -177,9 +177,10 @@ bool matchRemTwoDifference(Inst *difference, Inst *&leftInput,
 }
 
 Inst *emitSignedRemTwoNotEqual(Function *function, IRBuilder &builder,
-                               Inst *insertBefore, Inst *left, Inst *right) {
+                               Inst *insertBefore, Inst *left, Inst *right,
+                               Inst *tested) {
   builder.setInsertBefore(insertBefore);
-  builder.setCurrentSourceLocation(insertBefore->sourceLocation);
+  builder.setCurrentSourceLocation(tested->sourceLocation);
   Inst *zero = function->module->physicalRegister(rv64::ZERO);
   Inst *different = builder.emit(MOP_XOR, TY_I32, left, right);
   Inst *parityDiff = builder.emit(MOP_ANDI, TY_I32, different);
@@ -199,7 +200,8 @@ bool tryRemTwoVsRemTwo(Function *function, Inst *inst, IRBuilder &builder) {
   Inst *right = nullptr;
   if (!matchRemTwoDifference(site.tested, left, right))
     return false;
-  Inst *flag = emitSignedRemTwoNotEqual(function, builder, inst, left, right);
+  Inst *flag = emitSignedRemTwoNotEqual(function, builder, inst, left, right,
+                                        site.tested);
   if (site.isSnez)
     return builder.replace(inst, flag);
   site.consumer->setArg(0, flag);

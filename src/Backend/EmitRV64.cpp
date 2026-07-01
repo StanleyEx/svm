@@ -742,18 +742,18 @@ public:
         if (inst->getOp() == MOP_RET && !inst->next() && !block->next())
           fallthroughReturn = inst;
         const bool emitted = emitsInstructionText(inst, block);
-        emitInstruction(function, inst, block);
         if (emitted)
           emitSourceComment(function->module, inst, lastSourceLine);
+        emitInstruction(function, inst, block);
       }
     }
     if (hasReturn) {
       emitEpilogueLabel(function);
       emit(":\n");
       emitEpilogue(function);
-      emit("\tret\n");
       if (fallthroughReturn)
         emitSourceComment(function->module, fallthroughReturn, lastSourceLine);
+      emit("\tret\n");
     }
     emit("\t.size\t%s, .-%s\n", functionName(function), functionName(function));
 

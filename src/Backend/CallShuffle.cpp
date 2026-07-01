@@ -76,6 +76,7 @@ bool lowerEntryArgumentCopies(Function *function, IRBuilder &builder) {
     return false;
 
   builder.setInsertBefore(originals.front());
+  builder.setCurrentSourceLocation(originals.front()->sourceLocation);
   emitParallelMoves(builder, function, moves);
   for (Inst *inst : originals)
     inst->eraseFromBlock();
@@ -95,6 +96,7 @@ bool expandVarargPromotions(Function *function, IRBuilder &builder) {
              rv64::isGPR(static_cast<rv64::PReg>(inst->id)));
 
       builder.setInsertBefore(inst);
+      builder.setCurrentSourceLocation(inst->sourceLocation);
       Inst *convert = builder.emit(MOP_FCVT_D_S, TY_F64, source);
       convert->id = rv64::RESERVED_FPR_TMP;
       builder.replaceInPlace(
@@ -135,6 +137,7 @@ void lowerCallShufflesPostRA(Function *function) {
       }
 
       builder.setInsertBefore(call);
+      builder.setCurrentSourceLocation(call->sourceLocation);
       emitParallelMoves(builder, function, moves);
 
       Function *callee = call->getCallee();

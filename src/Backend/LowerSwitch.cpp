@@ -116,6 +116,7 @@ bool lowerSparseSwitch(Function *function, Inst *switchInst, Inst *selector,
   }
 
   builder.setInsertBefore(switchInst);
+  builder.setCurrentSourceLocation(switchInst->sourceLocation);
   Inst *firstValue =
       materializeCaseValue(builder, function->module, snapshot.values.front());
   builder.replaceInPlace(switchInst, MOP_BEQ, TY_VOID, selector, firstValue);
@@ -128,6 +129,7 @@ bool lowerSparseSwitch(Function *function, Inst *switchInst, Inst *selector,
 
   for (usize index = 1; index < tests.size(); ++index) {
     builder.setInsertAtEnd(tests[index]);
+    builder.setCurrentSourceLocation(switchInst->sourceLocation);
     Inst *caseValue =
         materializeCaseValue(builder, function->module, snapshot.values[index]);
     builder.emit(MOP_BEQ, TY_VOID, selector, caseValue);
@@ -194,6 +196,7 @@ bool lowerDenseSwitch(Function *function, Inst *switchInst, Inst *selector,
                    tableTargets.data(), static_cast<u32>(tableTargets.size()));
 
   builder.setInsertBefore(switchInst);
+  builder.setCurrentSourceLocation(switchInst->sourceLocation);
   Inst *index = selector;
   if (minimum != 0) {
     const i64 adjustment = -static_cast<i64>(minimum);
@@ -213,6 +216,7 @@ bool lowerDenseSwitch(Function *function, Inst *switchInst, Inst *selector,
   VERIFY(CFGEditor::rewriteBranchSlot(dispatch, false, tableLookup));
 
   builder.setInsertAtEnd(tableLookup);
+  builder.setCurrentSourceLocation(switchInst->sourceLocation);
   Inst *base = builder.emit(MOP_LA, TY_PTR);
   builder.bindJumpTable(base, table);
   Inst *wideIndex = builder.emit(MOP_SEXT_W, TY_I64, index);

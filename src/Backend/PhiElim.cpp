@@ -243,6 +243,7 @@ bool eliminatePhis(Function *function) {
       }
       assert(predecessor->endsWithTerminator());
       builder.setInsertBefore(predecessor->terminator());
+      builder.setCurrentSourceLocation(predecessor->terminator()->sourceLocation);
       emitParallelCopies(moves, builder, function);
     }
   }
