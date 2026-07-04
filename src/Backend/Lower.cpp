@@ -673,21 +673,6 @@ private:
   bool failed_ = false;
 };
 
-bool lowerToRV64(Function *function) {
-  if (!function || function->isExtern || !function->region ||
-      !function->region->first)
-    return false;
-  if (function->phase != IRPhase::LIR)
-    return false;
-  function->phase = IRPhase::MIR;
-  function->mirPhase = MIRPhase::SSA;
-  Lowering lowering(function);
-  const bool ok = lowering.run();
-  if (ok)
-    MachineDCE(function);
-  return ok;
-}
-
 } // namespace
 
 std::string_view LowerToRV64Pass::name() const noexcept {
@@ -695,8 +680,18 @@ std::string_view LowerToRV64Pass::name() const noexcept {
 }
 
 PassResult LowerToRV64Pass::run(Function *function, PassContext &) {
-  return lowerToRV64(function) ? PassResult::changedIR()
-                               : PassResult::noChange();
+  if (!function || function->isExtern || !function->region ||
+      !function->region->first)
+    return PassResult::noChange();
+  if (function->phase != IRPhase::LIR)
+    return PassResult::noChange();
+  function->phase = IRPhase::MIR;
+  function->mirPhase = MIRPhase::SSA;
+  Lowering lowering(function);
+  const bool ok = lowering.run();
+  if (ok)
+    MachineDCE(function);
+  return ok ? PassResult::changedIR() : PassResult::noChange();
 }
 
 } // namespace svm::ir
