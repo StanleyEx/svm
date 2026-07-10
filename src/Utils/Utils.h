@@ -30,6 +30,33 @@ using isize = std::ptrdiff_t;
 using uintptr = std::uintptr_t;
 using intptr = std::intptr_t;
 
+template <
+    typename Left, typename Right, typename Result,
+    std::enable_if_t<std::is_integral_v<Left> && std::is_integral_v<Right> &&
+                         std::is_integral_v<Result>,
+                     int> = 0>
+bool checkedAdd(Left left, Right right, Result &result) noexcept {
+  return !__builtin_add_overflow(left, right, &result);
+}
+
+template <
+    typename Left, typename Right, typename Result,
+    std::enable_if_t<std::is_integral_v<Left> && std::is_integral_v<Right> &&
+                         std::is_integral_v<Result>,
+                     int> = 0>
+bool checkedSub(Left left, Right right, Result &result) noexcept {
+  return !__builtin_sub_overflow(left, right, &result);
+}
+
+template <
+    typename Left, typename Right, typename Result,
+    std::enable_if_t<std::is_integral_v<Left> && std::is_integral_v<Right> &&
+                         std::is_integral_v<Result>,
+                     int> = 0>
+bool checkedMul(Left left, Right right, Result &result) noexcept {
+  return !__builtin_mul_overflow(left, right, &result);
+}
+
 // 返回无符号值的有效位数 零的有效位数为零
 constexpr u32 bitWidth(u64 value) noexcept {
   u32 width = 0;
