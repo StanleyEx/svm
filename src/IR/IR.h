@@ -140,7 +140,7 @@ enum OpCode : u16 {
   /// arg2 = ivAddr : TY_PTR
   /// -> TY_VOID
   /// Payload字段: body_ [Region]
-  /// 常量负步长使用iv > stop，其余步长必须满足正向契约并使用iv < stop。
+  /// 常量负步长使用iv > stop，其余步长必须满足正向契约并使用iv < stop
   /// 在HIR到LIR阶段(expand_for)会被降级为标准的旋转后循环:
   /// [init_bb]:   初始化ivAddr
   /// [header_bb]: load iv, cmp direction(iv, stop), br cond loop_bb / exit_bb
@@ -707,6 +707,7 @@ public:
   void setStride(i32 stride) noexcept { imm_ = stride; } // 设置GETPTR步长
   i32 getFrameIndex() const noexcept;
   void setFrameIndex(i32 index) noexcept { frameIndex_ = index; }
+  bool isCallInstruction() const noexcept;
   bool isMachine() const noexcept { return isMachineOp(op_); }
   bool isPrecoloredDef() const noexcept;         // 是否物理寄存器哨兵
   Inst *def() noexcept { return getArg(0); }     // 读取约定首操作数
@@ -1068,6 +1069,11 @@ public:
   static bool redirectEdge(Function *function, BasicBlock *pred,
                            BasicBlock *oldSucc, BasicBlock *newSucc,
                            std::initializer_list<PhiEdgeValue> values);
+  // 重定向到既有语义边 仅在两条路径的Phi值相同时合并
+  static bool
+  redirectEdgeAndMerge(Function *function, BasicBlock *pred,
+                       BasicBlock *oldSucc, BasicBlock *newSucc,
+                       const std::vector<PhiEdgeValue> &values = {});
   // 替换边值
   static bool setPhiEdgeValues(Function *function, BasicBlock *succ,
                                BasicBlock *pred,

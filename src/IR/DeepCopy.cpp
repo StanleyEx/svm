@@ -653,7 +653,9 @@ BasicBlock *DeepCopy::copySingleBlockInPath(
   BlockCloneConfig config;
   config.insertAfter = insertAfter;
   config.translateOperand = [&](Inst *value, Inst *, Inst *) {
-    return translateValue ? translateValue(value) : nullptr;
+    Inst *translated = translateValue ? translateValue(value) : nullptr;
+    // 返回原值表示调用方不覆盖 让copyBlocks继续应用块内克隆映射
+    return translated != value ? translated : nullptr;
   };
   config.externalTargetMode = newTerminatorTarget ? ExternalTargetMode::Redirect
                                                   : ExternalTargetMode::Mirror;

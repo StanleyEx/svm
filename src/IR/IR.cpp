@@ -381,6 +381,10 @@ i32 Inst::getFrameIndex() const noexcept {
   assert(isMachineFrameOp(op_));
   return frameIndex_;
 }
+
+bool Inst::isCallInstruction() const noexcept {
+  return op_ == OP_CALL || op_ == MOP_CALL;
+}
 bool Inst::isPrecoloredDef() const noexcept {
   return !block_ && id < 64 && op_ == MOP_NOP;
 }
@@ -513,8 +517,7 @@ void Inst::linkAfter(Inst *anchor) noexcept {
 
 void Inst::moveBefore(Inst *anchor) noexcept {
   assert(anchor && anchor->block_ && block_ && op_ != OP_PHI &&
-         anchor->getOp() != OP_PHI && !isTerminator(op_) &&
-         !isTerminator(anchor->getOp()));
+         anchor->getOp() != OP_PHI && !isTerminator(op_));
   if (anchor == this)
     return;
   unlinkFromBlock();

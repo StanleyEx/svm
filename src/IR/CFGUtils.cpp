@@ -512,6 +512,32 @@ bool CFGEditor::redirectEdge(Function *function, BasicBlock *pred,
                       std::vector<PhiEdgeValue>(values));
 }
 
+bool CFGEditor::redirectEdgeAndMerge(Function *function, BasicBlock *pred,
+                                     BasicBlock *oldSucc, BasicBlock *newSucc,
+                                     const std::vector<PhiEdgeValue> &values) {
+  if (!isFlatCFGBlock(function, pred) || !isFlatCFGBlock(function, oldSucc) ||
+      !isFlatCFGBlock(function, newSucc) || oldSucc == newSucc ||
+      !hasSemanticEdge(pred, oldSucc) || !hasSemanticEdge(pred, newSucc) ||
+      !hasConsistentIncomingState(pred) ||
+      !hasConsistentIncomingState(oldSucc) ||
+      !hasConsistentIncomingState(newSucc) ||
+      !hasPredecessorSlot(oldSucc, pred) || !hasPredecessorSlot(newSucc, pred))
+    return false;
+
+  std::unordered_map<Inst *, Inst *> plan;
+  if (!collectPhiPlan(newSucc, values, plan, true))
+    return false;
+  for (const auto &[phi, value] : plan)
+    if (getPhiIncomingValue(phi, pred) != value)
+      return false;
+
+  VERIFY(rewriteSuccessorEdges(pred, oldSucc, newSucc));
+  dropIncomingForRemovedEdge(function, pred, oldSucc);
+  assert(hasConsistentIncomingState(oldSucc));
+  assert(hasConsistentIncomingState(newSucc));
+  return true;
+}
+
 bool CFGEditor::rewriteBranchSlot(BasicBlock *pred, bool trueEdge,
                                   BasicBlock *newTarget) {
   if (!pred || !newTarget || !pred->endsWithTerminator())

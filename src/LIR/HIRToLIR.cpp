@@ -281,7 +281,7 @@ void HIRToLIR::expandWhile(Inst *inst) {
     appendJumpIfOpen(bodyBlock, conditionBlock);
 }
 
-// current -> preheader(load/cmp/br) -> body -> latch(load/add/store/cmp/br)。
+// current -> preheader(load/cmp/br) -> body -> latch(load/add/store/cmp/br)
 // 首次guard保留zero-trip continue进入latch完成步进 break直接进入after
 // 正步长用LT 负常量步长用GT 原OP_FOR后的suffix迁移到after
 void HIRToLIR::expandFor(Inst *inst) {
