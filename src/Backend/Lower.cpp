@@ -1,6 +1,8 @@
+#include "Analysis.h"
 #include "MIRPass.h"
 #include "MoveInfo.h"
 #include "RV64.h"
+#include "VReg.h"
 
 #include <algorithm>
 #include <cassert>
@@ -22,8 +24,9 @@ using rv64::SP;
 // 常量按使用点物化 确保每个机器操作数都是IRC可见的块内定义
 class Lowering {
 public:
-  explicit Lowering(Function *function)
-      : function_(function), builder_(function->module, function) {}
+  explicit Lowering(Function *function, const SCEV *scev)
+      : function_(function), builder_(function->module, function), scev_(scev) {
+  }
 
   bool run() {
     if (!function_ || !function_->region || !function_->region->first)
@@ -38,6 +41,60 @@ public:
   }
 
 private:
+  // 只拍摄无控制流上下文的LIR事实 避免把边上成立的结论固化到MIR定义
+  ScalarFactBundle computeStableScalarFacts(Inst *value) const {
+    if (!value || (value->getType() != TY_I1 && value->getType() != TY_I32))
+      return {};
+    if (value->getOp() == OP_ICONST) {
+      ScalarFactBundle facts =
+          ScalarFactBundle::fromConstant(value->getImm(), FactSource::LIR_SCEV);
+      canonicalizeBundle(facts);
+      return facts;
+    }
+    if (!scev_)
+      return {};
+    ScalarFactBundle facts = ScalarFactBundle::fromRange(
+        scev_->getI32Range(value), FactSource::LIR_SCEV);
+    canonicalizeBundle(facts);
+    return facts;
+  }
+
+  // 仅允许语义保值或布尔化的i32结果继承LIR事实
+  static bool canBridgeScalarFacts(OpCode lirOp, OpCode mirOp) noexcept {
+    if (lirOp == OP_ICONST)
+      return mirOp == MOP_LI;
+    if ((lirOp >= OP_EQ && lirOp <= OP_GE) ||
+        (lirOp >= OP_FEQ && lirOp <= OP_FGE) || lirOp == OP_LNOT)
+      return mirOp == MOP_SLT || mirOp == MOP_SEQZ || mirOp == MOP_SNEZ ||
+             mirOp == MOP_FEQ_S || mirOp == MOP_FLT_S || mirOp == MOP_FLE_S;
+    return lirOp == OP_ZEXT && mirOp == MOP_ANDI;
+  }
+
+  // 将规范化后的稳定事实附到对应MIR虚拟寄存器定义
+  void annotateScalarFacts(Inst *definition, ScalarFactBundle facts) const {
+    if (!definition || definition->getType() != TY_I32 || !facts.valid)
+      return;
+    canonicalizeBundle(facts);
+    attachFactBundle(function_, definition, facts);
+  }
+
+  // 所有LIR事实下传统一经过操作码语义门限
+  void annotateLoweredScalarFacts(Inst *definition, ScalarFactBundle facts,
+                                  OpCode lirOp, OpCode mirOp) const {
+    if (canBridgeScalarFacts(lirOp, mirOp))
+      annotateScalarFacts(definition, facts);
+  }
+
+  // Lowering自行物化的i32立即数具有确定的机器语义
+  void attachI32ConstantFact(Inst *definition, i32 value) const {
+    if (!definition || definition->getType() != TY_I32)
+      return;
+    ScalarFactBundle facts =
+        ScalarFactBundle::fromConstant(value, FactSource::LoweringSemantic);
+    canonicalizeBundle(facts);
+    attachFactBundle(function_, definition, facts);
+  }
+
   // 在使用点之前物化浮点或整数值
   Inst *materialize(Inst *value, Inst *before) {
     if (!value)
@@ -49,16 +106,19 @@ private:
       if (value->getType() == TY_F32) {
         Inst *bits = builder_.emit(MOP_LI, TY_I32);
         bits->setImm(0);
+        attachI32ConstantFact(bits, 0);
         return builder_.emit(MOP_FMV_W_X, TY_F32, bits);
       }
       Inst *zero = builder_.emit(MOP_LI, value->getType());
       zero->setImm(0);
+      attachI32ConstantFact(zero, 0);
       return zero;
     }
     switch (value->getOp()) {
     case OP_ICONST: {
       Inst *li = builder_.emit(MOP_LI, value->getType());
       li->setImm(value->getImm());
+      attachI32ConstantFact(li, value->getImm());
       return li;
     }
     case OP_FCONST: {
@@ -197,7 +257,7 @@ private:
                                  old.falseBB);
   }
 
-  void lowerCall(Inst *instruction) {
+  void lowerCall(Inst *instruction, const ScalarFactBundle &facts) {
     Function *callee = instruction->getCallee();
     const u32 count = instruction->getOperandCount();
     std::vector<Inst *> arguments;
@@ -277,6 +337,7 @@ private:
                               instruction->getType() == TY_PTR ? TY_PTR
                                                                : TY_I32,
                               function_->module->physicalRegister(A0));
+      annotateLoweredScalarFacts(result, facts, OP_CALL, result->getOp());
       replaceAllUsesWith(function_, instruction, result);
     }
     instruction->eraseFromBlock();
@@ -315,6 +376,7 @@ private:
     // 原地替换会保留旧指针 重新发射的指令则必须显式继承当前LIR源码位置
     builder_.setCurrentSourceLocation(instruction->sourceLocation);
     const OpCode op = instruction->getOp();
+    const ScalarFactBundle oldFacts = computeStableScalarFacts(instruction);
     switch (op) {
     case OP_FADD:
       builder_.replaceInPlace(instruction, MOP_FADD_S, TY_F32,
@@ -360,6 +422,7 @@ private:
           builder_.setInsertBefore(instruction);
           Inst *result = builder_.emit(MOP_ADDIW, TY_I32, left);
           result->setImm(static_cast<i32>(immediate));
+          annotateLoweredScalarFacts(result, oldFacts, op, result->getOp());
           replaceAllUsesWith(function_, instruction, result);
           instruction->eraseFromBlock();
           return;
@@ -432,6 +495,7 @@ private:
                                    op == OP_LE ? left : right);
         result = builder_.emit(MOP_SEQZ, TY_I32, less);
       }
+      annotateLoweredScalarFacts(result, oldFacts, op, result->getOp());
       replaceAllUsesWith(function_, instruction, result);
       instruction->eraseFromBlock();
       return;
@@ -439,12 +503,15 @@ private:
     case OP_FEQ:
       builder_.replaceInPlace(instruction, MOP_FEQ_S, TY_I32,
                               arg(instruction, 0), arg(instruction, 1));
+      annotateLoweredScalarFacts(instruction, oldFacts, op,
+                                 instruction->getOp());
       return;
     case OP_FNE: {
       builder_.setInsertBefore(instruction);
       Inst *equal = builder_.emit(MOP_FEQ_S, TY_I32, arg(instruction, 0),
                                   arg(instruction, 1));
       Inst *result = builder_.emit(MOP_SEQZ, TY_I32, equal);
+      annotateLoweredScalarFacts(result, oldFacts, op, result->getOp());
       replaceAllUsesWith(function_, instruction, result);
       instruction->eraseFromBlock();
       return;
@@ -452,38 +519,52 @@ private:
     case OP_FLT:
       builder_.replaceInPlace(instruction, MOP_FLT_S, TY_I32,
                               arg(instruction, 0), arg(instruction, 1));
+      annotateLoweredScalarFacts(instruction, oldFacts, op,
+                                 instruction->getOp());
       return;
     case OP_FLE:
       builder_.replaceInPlace(instruction, MOP_FLE_S, TY_I32,
                               arg(instruction, 0), arg(instruction, 1));
+      annotateLoweredScalarFacts(instruction, oldFacts, op,
+                                 instruction->getOp());
       return;
     case OP_FGT:
       builder_.replaceInPlace(instruction, MOP_FLT_S, TY_I32,
                               arg(instruction, 1), arg(instruction, 0));
+      annotateLoweredScalarFacts(instruction, oldFacts, op,
+                                 instruction->getOp());
       return;
     case OP_FGE:
       builder_.replaceInPlace(instruction, MOP_FLE_S, TY_I32,
                               arg(instruction, 1), arg(instruction, 0));
+      annotateLoweredScalarFacts(instruction, oldFacts, op,
+                                 instruction->getOp());
       return;
     case OP_ZEXT:
       builder_.setInsertBefore(instruction);
       {
         Inst *result = builder_.emit(MOP_ANDI, TY_I32, arg(instruction, 0));
         result->setImm(1);
+        annotateLoweredScalarFacts(result, oldFacts, op, result->getOp());
         replaceAllUsesWith(function_, instruction, result);
       }
       instruction->eraseFromBlock();
       return;
     case OP_LNOT:
       builder_.setInsertBefore(instruction);
-      replaceAllUsesWith(function_, instruction,
-                         builder_.emit(MOP_SEQZ, TY_I32, arg(instruction, 0)));
+      {
+        Inst *result = builder_.emit(MOP_SEQZ, TY_I32, arg(instruction, 0));
+        annotateLoweredScalarFacts(result, oldFacts, op, result->getOp());
+        replaceAllUsesWith(function_, instruction, result);
+      }
       instruction->eraseFromBlock();
       return;
     case OP_ICONST: {
       const i32 value = instruction->getImm();
       builder_.replaceInPlace(instruction, MOP_LI, instruction->getType());
       instruction->setImm(value);
+      annotateLoweredScalarFacts(instruction, oldFacts, op,
+                                 instruction->getOp());
     }
       return;
     case OP_FCONST: {
@@ -583,7 +664,7 @@ private:
       return;
     }
     case OP_CALL:
-      lowerCall(instruction);
+      lowerCall(instruction, oldFacts);
       return;
     case OP_BR:
       lowerBranch(instruction);
@@ -670,6 +751,7 @@ private:
   Function *function_ = nullptr;
   IRBuilder builder_;
   Inst *entryCursor_ = nullptr; // 入口参数绑定及全局地址物化游标
+  const SCEV *scev_ = nullptr;
   bool failed_ = false;
 };
 
@@ -679,15 +761,20 @@ std::string_view LowerToRV64Pass::name() const noexcept {
   return "lower-to-rv64";
 }
 
-PassResult LowerToRV64Pass::run(Function *function, PassContext &) {
+PassResult LowerToRV64Pass::run(Function *function, PassContext &context) {
   if (!function || function->isExtern || !function->region ||
       !function->region->first)
     return PassResult::noChange();
   if (function->phase != IRPhase::LIR)
     return PassResult::noChange();
+  const SCEV *scev = nullptr;
+  if (computePreds(function)) {
+    context.functionAnalyses().clear(function);
+    scev = &context.get<SCEVAnalysis>(function).info;
+  }
   function->phase = IRPhase::MIR;
   function->mirPhase = MIRPhase::SSA;
-  Lowering lowering(function);
+  Lowering lowering(function, scev);
   const bool ok = lowering.run();
   if (ok)
     MachineDCE(function);
