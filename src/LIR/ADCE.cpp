@@ -243,7 +243,7 @@ void eraseDeadInstructions(Function *function,
 }
 
 ADCEChanges runADCE(Function *function, const PostDominatorTree &postDom,
-                    bool initiallyChanged) {
+                    const GlobalSummaryResult *effects, bool initiallyChanged) {
   ADCEChanges result{initiallyChanged, initiallyChanged};
   const BlockSet reachable = computeReachable(function);
   const ControlDependencies controlDependencies =
@@ -263,8 +263,10 @@ ADCEChanges runADCE(Function *function, const PostDominatorTree &postDom,
       continue;
     for (Inst *inst = block->firstInst(); inst; inst = inst->next()) {
       const OpCode op = inst->getOp();
-      // TODO(IPA)
-      if (op == OP_RET || op == OP_STORE || op == OP_CALL ||
+      const bool observableCall =
+          op == OP_CALL &&
+          (!effects || effects->calleeEffect(inst->getCallee()).maySide());
+      if (op == OP_RET || op == OP_STORE || observableCall ||
           isLocalInitAnchor(op) ||
           (isLIRTerminator(op) && op != OP_BR && op != OP_JMP))
         mark(inst);
@@ -372,7 +374,13 @@ PassResult ADCEPass::run(Function *function, PassContext &context) {
 
   const PostDominatorTree &postDom =
       context.get<PostDomAnalysis>(function).tree;
-  const ADCEChanges changes = runADCE(function, postDom, removedUnreachable);
+  // ADCE 不会新增副作用 因此该摘要对于剩余调用仍是 sound 的
+  const GlobalSummaryResult *effects =
+      function->module
+          ? &context.get<GlobalSummaryAnalysis>(function->module).result
+          : nullptr;
+  const ADCEChanges changes =
+      runADCE(function, postDom, effects, removedUnreachable);
   if (!changes.changed)
     return PassResult::noChange();
 
