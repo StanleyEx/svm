@@ -1,8 +1,11 @@
+#include "Analysis.h"
 #include "LIRPass.h"
 #include "Matcher.h"
+#include "ValueFacts.h"
 
 #include <cassert>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -32,16 +35,37 @@ void eraseDeadScalarChain(std::vector<Inst *> dead) {
 
 class CombineContext {
 public:
-  CombineContext(Function *function, bool fastMath) noexcept
-      : builder_(function->module, function), fastMath_(fastMath) {}
+  CombineContext(Function *function, PassContext &passContext,
+                 bool fastMath) noexcept
+      : function_(function), passContext_(passContext),
+        builder_(function->module, function), fastMath_(fastMath) {}
 
   IRBuilder &builder() noexcept { return builder_; }
   bool fastMath() const noexcept { return fastMath_; }
+
+  ValueFactOracle &factOracle() {
+    if (factOracle_ && !factsStale_)
+      return *factOracle_;
+    if (factsStale_) {
+      PreservedAnalyses preserved;
+      preserved.preserveCFGAnalyses();
+      preserved.preserveSSAForm();
+      preserved.preserveAllModuleAnalyses();
+      passContext_.invalidate(function_, preserved);
+      factsStale_ = false;
+    }
+    const DominatorTree &dominators =
+        passContext_.get<DomAnalysis>(function_).tree;
+    const SCEV &scev = passContext_.get<SCEVAnalysis>(function_).info;
+    factOracle_.emplace(&scev, &dominators);
+    return *factOracle_;
+  }
 
   bool replace(Inst *victim, Inst *replacement) {
     std::vector<Inst *> oldOperands = operandsOf(victim);
     VERIFY(builder_.replace(victim, replacement), "combine replacement failed");
     eraseDeadScalarChain(std::move(oldOperands));
+    markFactsStale();
     return true;
   }
 
@@ -50,6 +74,7 @@ public:
     VERIFY(builder_.replaceWithConst(victim, value),
            "integer combine replacement failed");
     eraseDeadScalarChain(std::move(oldOperands));
+    markFactsStale();
     return true;
   }
 
@@ -58,6 +83,7 @@ public:
     VERIFY(builder_.replaceWithConst(victim, value),
            "floating combine replacement failed");
     eraseDeadScalarChain(std::move(oldOperands));
+    markFactsStale();
     return true;
   }
 
@@ -65,6 +91,7 @@ public:
     std::vector<Inst *> oldOperands = operandsOf(victim);
     Inst *result = builder_.replaceInPlace(victim, op, type, arg);
     eraseDeadScalarChain(std::move(oldOperands));
+    markFactsStale();
     return result;
   }
 
@@ -72,11 +99,12 @@ public:
     std::vector<Inst *> oldOperands = operandsOf(victim);
     Inst *result = builder_.replaceInPlace(victim, op, type, left, right);
     eraseDeadScalarChain(std::move(oldOperands));
+    markFactsStale();
     return result;
   }
 
 private:
-  static std::vector<Inst *> operandsOf(Inst *inst) { // 旧操作数
+  static std::vector<Inst *> operandsOf(Inst *inst) {
     std::vector<Inst *> operands;
     operands.reserve(inst->getOperandCount());
     for (u32 index = 0; index < inst->getOperandCount(); ++index)
@@ -84,8 +112,18 @@ private:
     return operands;
   }
 
+  // 标记值图相关分析需要延迟重建
+  void markFactsStale() noexcept {
+    factOracle_.reset();
+    factsStale_ = true;
+  }
+
+  Function *function_ = nullptr;
+  PassContext &passContext_;
   IRBuilder builder_;
   bool fastMath_ = false;
+  std::optional<ValueFactOracle> factOracle_;
+  bool factsStale_ = false; // 是否发生过尚未同步到分析缓存的改写
 };
 
 #define IC_REWRITE(pattern, body)                                              \
@@ -328,13 +366,18 @@ bool isSyntacticallyNonNegative(Inst *value, NonNegativeMemo &memo) {
   return result;
 }
 
-bool knownNonNegative(Inst *value) {
+bool knownNonNegative(CombineContext &context, Inst *value,
+                      BasicBlock *contextBlock) {
   NonNegativeMemo memo;
   if (isSyntacticallyNonNegative(value, memo))
     return true;
 
-  // TODO(SCEV)
-  return false;
+  if (!value || value->getType() != TY_I32 || !contextBlock)
+    return false;
+  ValueFactQuery query;
+  query.contextBlock = contextBlock;
+  const auto lower = context.factOracle().getI32Range(value, query).signedMin();
+  return lower && *lower >= 0;
 }
 
 bool foldReflectedSubCompare(CombineContext &context, Inst *inst) {
@@ -358,7 +401,8 @@ bool foldReflectedSubCompare(CombineContext &context, Inst *inst) {
   if (constant < 0)
     return false;
 
-  const bool nonNegative = knownNonNegative(value);
+  const bool nonNegative =
+      knownNonNegative(context, value, inst->parentBlock());
   if (!nonNegative && constant == std::numeric_limits<i32>::max()) {
     IRBuilder &builder = context.builder();
     builder.setInsertBefore(inst);
@@ -656,10 +700,10 @@ bool tryFold(CombineContext &context, Inst *inst) {
   }
 }
 
-bool instCombine(Function *function, bool fastMath) {
+bool instCombine(Function *function, PassContext &passContext, bool fastMath) {
   assert(function && function->phase == IRPhase::LIR);
   computeUses(function);
-  CombineContext context(function, fastMath);
+  CombineContext context(function, passContext, fastMath);
   bool changed = false;
   constexpr u32 MaxRounds = 4;
 
@@ -696,15 +740,16 @@ std::string_view InstCombinePass::name() const noexcept {
   return "inst-combine";
 }
 
-PassResult InstCombinePass::run(Function *function, PassContext &) {
+PassResult InstCombinePass::run(Function *function, PassContext &context) {
   if (!function || function->isExtern || function->phase != IRPhase::LIR ||
       !function->region || !function->region->first)
     return PassResult::noChange();
-  if (!instCombine(function, fastMath_))
+  if (!instCombine(function, context, fastMath_))
     return PassResult::noChange();
   PreservedAnalyses preserved;
   preserved.preserveCFGAnalyses();
   preserved.preserveSSAForm();
+  preserved.preserveAllModuleAnalyses();
   return PassResult::changedIR(std::move(preserved));
 }
 
