@@ -1,9 +1,12 @@
+#include "Analysis.h"
 #include "IR.h"
 #include "LIRPass.h"
+#include "ValueFacts.h"
 
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -44,14 +47,19 @@ using CFGEdge = std::pair<BasicBlock *, BasicBlock *>;
 
 class SCCPSolver {
 public:
-  explicit SCCPSolver(Function *function) noexcept
-      : function_(function), builder_(function->module, function) {}
+  explicit SCCPSolver(Function *function, const SCEV *scev = nullptr,
+                      const DominatorTree *dominatorTree = nullptr) noexcept
+      : function_(function), builder_(function->module, function), scev_(scev),
+        dominatorTree_(dominatorTree) {}
 
   bool run(bool &cfgChanged) {
     if (!function_->region || !function_->region->first)
       return false;
     computeUses(function_);
+    if (scev_ && dominatorTree_)
+      factOracle_.emplace(scev_, dominatorTree_);
     analyze();
+    factOracle_.reset();
     return rewrite(cfgChanged);
   }
 
@@ -127,10 +135,9 @@ private:
     const LatticeValue newValue = evaluate(inst);
     if (oldValue == newValue)
       return;
-    assert(
-        (!oldValue.isBottom() ||                          // Bottom状态不可逆
-         !(oldValue.isConstant() && newValue.isTop())) && // 从Top或Constant下降
-        "SCCP 格值必须单调下降");
+    assert(!oldValue.isBottom() && "SCCP Bottom格值不可逆");
+    assert(!(oldValue.isConstant() && newValue.isTop()) &&
+           "SCCP Constant格值不能回到Top");
     values_[inst] = newValue;
     for (const Use *use = inst->uses(); use; use = use->next)
       ssaWorklist_.push_back(use->user);
@@ -237,7 +244,15 @@ private:
   LatticeValue evaluateCompare(Inst *inst) {
     const LatticeValue left = valueOf(inst->getArg(0));
     const LatticeValue right = valueOf(inst->getArg(1));
-    // TODO(SCEV)
+    if (isIntCompare(inst->getOp())) {
+      const LatticeValue byRange = evaluateCompareByRange(inst, left, right);
+      if (byRange.isConstant())
+        return byRange;
+      const LatticeValue byPredicate =
+          evaluateCompareBySCEVPredicate(inst, left, right);
+      if (byPredicate.isConstant())
+        return byPredicate;
+    }
     if (left.isTop() || right.isTop())
       return LatticeValue::top();
     if (left.isBottom() || right.isBottom())
@@ -286,6 +301,80 @@ private:
     }
     return LatticeValue::fromConstant(builder_.i1Const(result));
   }
+  // 用稳定值域判定整数比较
+  LatticeValue evaluateCompareByRange(Inst *inst, const LatticeValue &left,
+                                      const LatticeValue &right) {
+    if (!factOracle_ || !isIntCompare(inst->getOp()))
+      return LatticeValue::bottom();
+
+    ValueFactQuery query;
+    query.contextBlock = nullptr;
+    query.useLocalExpr = false;
+    query.useNonLoopPhi = false;
+    const auto rangeOf = [&](Inst *value,
+                             const LatticeValue &lattice) -> I32Range {
+      if (lattice.isConstant())
+        return I32Range::constant(lattice.constant->getImm());
+      if (lattice.isTop())
+        return I32Range::unknown();
+      return factOracle_->getI32Range(value, query);
+    };
+
+    const I32Range leftRange = rangeOf(inst->getArg(0), left);
+    const I32Range rightRange = rangeOf(inst->getArg(1), right);
+    if (leftRange.isUnknown() || rightRange.isUnknown())
+      return LatticeValue::bottom();
+
+    IntPred predicate;
+    switch (inst->getOp()) {
+    case OP_LT:
+      predicate = IntPred::SLT;
+      break;
+    case OP_LE:
+      predicate = IntPred::SLE;
+      break;
+    case OP_GT:
+      predicate = IntPred::SGT;
+      break;
+    case OP_GE:
+      predicate = IntPred::SGE;
+      break;
+    case OP_EQ:
+      predicate = IntPred::EQ;
+      break;
+    case OP_NE:
+      predicate = IntPred::NE;
+      break;
+    default:
+      return LatticeValue::bottom();
+    }
+
+    const KnownBool result = evalIntCompare(predicate, leftRange, rightRange);
+    if (result == KnownBool::AlwaysTrue)
+      return LatticeValue::fromConstant(builder_.i1Const(true));
+    if (result == KnownBool::AlwaysFalse)
+      return LatticeValue::fromConstant(builder_.i1Const(false));
+    return LatticeValue::bottom();
+  }
+  // 用同余与递推事实判定整数比较
+  LatticeValue evaluateCompareBySCEVPredicate(Inst *inst,
+                                              const LatticeValue &left,
+                                              const LatticeValue &right) {
+    if (!scev_ || !isIntCompare(inst->getOp()) || left.isTop() || right.isTop())
+      return LatticeValue::bottom();
+
+    PredicateQuery query;
+    query.contextBlock = nullptr;
+    query.predicateContext = nullptr;
+    query.congruenceDomain = ArithmeticDomain::I32Wrapping;
+    const KnownBool result = scev_->evaluatePredicate(inst, query);
+    if (result == KnownBool::AlwaysTrue)
+      return LatticeValue::fromConstant(builder_.i1Const(true));
+    if (result == KnownBool::AlwaysFalse)
+      return LatticeValue::fromConstant(builder_.i1Const(false));
+    return LatticeValue::bottom();
+  }
+
   LatticeValue evaluateConversion(Inst *inst) {
     const LatticeValue operand = valueOf(inst->getArg(0));
     if (operand.isTop())
@@ -481,24 +570,29 @@ private:
 
   Function *function_ = nullptr;
   IRBuilder builder_;
+  const SCEV *scev_ = nullptr;
+  const DominatorTree *dominatorTree_ = nullptr;
+  std::optional<ValueFactOracle> factOracle_;
   std::unordered_map<Inst *, LatticeValue> values_;          // SSA值格状态
   std::unordered_set<CFGEdge, CFGEdgeHash> executableEdges_; // 可执行边集合
   std::unordered_set<BasicBlock *> reachableBlocks_;         // 已激活块集合
   std::vector<CFGEdge> cfgWorklist_;                         // 待激活CFG边
-  std::vector<Inst *> ssaWorklist_;                          // 待重算SSA用户
+  std::vector<Inst *> ssaWorklist_;                          // 待重算SSA Use
 };
 
 } // namespace
 
 std::string_view SCCPPass::name() const noexcept { return "sccp"; }
 
-PassResult SCCPPass::run(Function *function, PassContext &) {
+PassResult SCCPPass::run(Function *function, PassContext &context) {
   if (!function || function->isExtern || function->phase != IRPhase::LIR ||
       !function->region || !function->region->first)
     return PassResult::noChange();
 
+  const SCEV &scev = context.get<SCEVAnalysis>(function).info;
+  const DominatorTree &dominators = context.get<DomAnalysis>(function).tree;
   bool cfgChanged = false;
-  if (!SCCPSolver(function).run(cfgChanged))
+  if (!SCCPSolver(function, &scev, &dominators).run(cfgChanged))
     return PassResult::noChange();
 
   PreservedAnalyses preserved;
