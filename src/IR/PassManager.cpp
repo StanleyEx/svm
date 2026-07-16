@@ -179,15 +179,11 @@ PassManager::PassManager(DiagnosticEngine *diagnostics)
 PassManager::~PassManager() = default;
 
 void PassManager::addPass(std::unique_ptr<ModulePass> pass) {
-  if (aborted_)
-    return;
   validatePass(pass.get(), diagnostics_);
   steps_.emplace_back(std::move(pass));
 }
 
 void PassManager::addPass(std::unique_ptr<FunctionPass> pass) {
-  if (aborted_)
-    return;
   validatePass(pass.get(), diagnostics_);
   steps_.emplace_back(std::move(pass));
 }

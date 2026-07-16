@@ -484,16 +484,12 @@ public:
     static_assert(std::is_base_of_v<ModulePass, Pass> ||
                       std::is_base_of_v<FunctionPass, Pass>,
                   "Pass必须继承ModulePass或FunctionPass.");
-    if (aborted_)
-      return;
     addPass(std::make_unique<Pass>(std::forward<Args>(args)...));
   }
 
-  void abort() noexcept { aborted_ = true; }
   bool run(Module *module);
 
-  bool aborted() const noexcept { return aborted_; } // 查询构建是否截断
-  PassContext &context();                            // 读取最近一次运行上下文
+  PassContext &context(); // 读取最近一次运行上下文
   ModuleAnalysisManager &moduleAnalyses() noexcept { return moduleAnalyses_; }
   FunctionAnalysisManager &functionAnalyses() noexcept {
     return functionAnalyses_;
@@ -518,7 +514,6 @@ private:
   PipelineOptions options_;                  // 流水线调度选项
   std::optional<PassContext> context_;       // 最近一次运行的内联上下文
   DiagnosticEngine *diagnostics_ = nullptr;  // 非拥有诊断通道
-  bool aborted_ = false;                     // 是否截断后续管线构建
 };
 
 } // namespace svm::ir

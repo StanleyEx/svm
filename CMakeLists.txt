@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
 
-project(sysy_compiler CXX)
+project(svm_compiler CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,8 +20,8 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 add_compile_options(
     -Wall -Wextra -Wpedantic
-    # -Werror
-    # -Wno-unused-parameter
+    -Werror
+    -Wno-unused-parameter
     -Wno-gnu-zero-variadic-macro-arguments
     -fno-rtti
     -fno-exceptions
@@ -49,7 +49,7 @@ if(NOT LIB_SOURCES)
     message(FATAL_ERROR "Cannot find any lib files.")
 endif()
 
-message(STATUS "Program enrty: ${MAIN_SOURCE}")
+message(STATUS "Program entry: ${MAIN_SOURCE}")
 list(LENGTH LIB_SOURCES LIB_COUNT)
 message(STATUS "Libs: ${LIB_COUNT}")
 add_library(svm_core STATIC ${LIB_SOURCES})
@@ -60,6 +60,7 @@ target_include_directories(svm_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Utils
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Frontend
     ${CMAKE_CURRENT_SOURCE_DIR}/src/IR
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/HIR
     ${CMAKE_CURRENT_SOURCE_DIR}/src/LIR
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Backend
 )
