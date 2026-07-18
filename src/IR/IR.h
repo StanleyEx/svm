@@ -1047,6 +1047,8 @@ public:
     BasicBlock *block = nullptr; // 新建汇合块，失败时为空
     bool createdPhi = false;     // 是否为不同边值创建了中间Phi
   };
+  // 在普通指令后拆块并保留原后继Phi边值
+  static BasicBlock *splitBlockAfter(Function *function, Inst *anchor);
   // 分裂单条CFG边
   static BasicBlock *splitCriticalEdge(Function *function, BasicBlock *pred,
                                        BasicBlock *succ);
@@ -1158,9 +1160,9 @@ const Inst *getMemoryBase(const Inst *address) noexcept; // 寻址得到基对�
 Inst *getMemoryBase(Inst *address) noexcept;
 bool mayAlias(const Inst *left, const Inst *right) noexcept; // 简易地址别名分析
 std::vector<BasicBlock *> computeRPO(Function *function);
-// 规范化LIR/MIR顶层扁平CFG的前驱和Phi输入
+// 规范化LIR/MIR顶层扁平CFG的前驱和Phi输入 返回false表示CFG非法 操作失败
 bool computePreds(Function *function);
-// 删除LIR/MIR顶层扁平CFG中入口不可达的块
+// 删除LIR/MIR顶层扁平CFG中入口不可达的块 返回false表示CFG非法 操作失败
 bool cleanupDeadBlocks(Function *function);
 
 template <typename Func>

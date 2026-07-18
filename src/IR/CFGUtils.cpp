@@ -585,6 +585,36 @@ BasicBlock *CFGEditor::splitCriticalEdge(Function *function, BasicBlock *pred,
   return middle;
 }
 
+BasicBlock *CFGEditor::splitBlockAfter(Function *function, Inst *anchor) {
+  if (!function || !anchor || anchor->isErased() || !anchor->parentBlock() ||
+      anchor->getOp() == OP_PHI || isTerminator(anchor->getOp()))
+    return nullptr;
+  BasicBlock *block = anchor->parentBlock();
+  if (!isFlatCFGBlock(function, block) || !block->endsWithTerminator() ||
+      anchor == block->terminator() || !hasConsistentIncomingState(block))
+    return nullptr;
+
+  std::vector<BasicBlock *> successors;
+  forEachSuccessor(
+      block, [&](BasicBlock *successor) { successors.push_back(successor); });
+  for (BasicBlock *successor : successors)
+    if (!isFlatCFGBlock(function, successor) ||
+        !hasConsistentIncomingState(successor) ||
+        !hasPredecessorSlot(successor, block))
+      return nullptr;
+
+  IRBuilder builder(function->module, function);
+  BasicBlock *continuation = builder.newBlockAfter(block);
+  continuation->takeInstructionSuffixAfter(anchor);
+  for (BasicBlock *successor : successors)
+    VERIFY(movePhiEdgeValues(successor, block, continuation));
+
+  builder.setInsertAtEnd(block);
+  builder.emitJump(continuation);
+  VERIFY(computePreds(function));
+  return continuation;
+}
+
 CFGEditor::SplitBlockPredsResult
 CFGEditor::splitBlockPredecessors(Function *function, BasicBlock *succ,
                                   BasicBlock *const *preds, u32 predCount,
