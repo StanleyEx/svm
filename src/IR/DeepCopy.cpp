@@ -675,6 +675,7 @@ Function *DeepCopy::copyFunction(Function *source, const char *newName) {
   Module *module = source->module;
   const char *name = newName ? module->arena->duplicateString(newName)
                              : module->arena->duplicateString(source->name);
+  Function *previousTail = module->functionTail;
   Function *clone = module->newFunction(name, source->returnType,
                                         source->paramTypes, source->paramCount,
                                         source->functionType, source->isExtern);
@@ -697,8 +698,18 @@ Function *DeepCopy::copyFunction(Function *source, const char *newName) {
       cloneInst->setCallee(clone);
   };
   RegionCloneResult body = copier.copyRegion(source->region, config);
-  if (!body.region)
+  if (!body.region) {
+    assert(module->functionTail == clone &&
+           (!previousTail || previousTail->next == clone) &&
+           "DeepCopy函数体克隆失败, 克隆函数必须仍然是模块尾部.");
+    if (previousTail)
+      previousTail->next = nullptr;
+    else
+      module->functionHead = nullptr;
+    module->functionTail = previousTail;
+    clone->next = nullptr;
     return nullptr;
+  }
   clone->region = body.region;
   clone->region->owner = nullptr;
   clone->region->parent = nullptr;
