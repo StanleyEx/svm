@@ -36,13 +36,17 @@ private:
   Inst *materializeAddress(const ASTNode *declaration); // 解析存储地址
   Inst *lowerCondition(ExprNode *expr);
   Inst *materializeString(StringLiteralExpr *literal);
-  bool packGlobalInit(InitSegment *segments, u32 segmentCount, Global *global,
-                      SourceLocation location); // 打包全局初始化
+  // 打包全局初始化
+  bool packGlobalInit(InitSegment *segments, u32 segmentCount,
+                      const ArrayType *array, Global *global,
+                      SourceLocation location);
+  // 读取常量字面量
   bool extractConstantLiteral(ExprNode *expr, IRType target, i32 &integer,
-                              f32 &floating) const; // 读取常量字面量
-  bool hasValidSignature(FuncDecl *declaration);    // 校验函数签名
-  bool signaturesMatch(FuncDecl *left,
-                       FuncDecl *right) const; // 比较函数签名
+                              f32 &floating) const;
+  // 校验函数签名
+  bool hasValidSignature(FuncDecl *declaration);
+  // 比较函数签名
+  bool signaturesMatch(FuncDecl *left, FuncDecl *right) const;
   Type *declarationType(const ASTNode *declaration) const noexcept;
   Type *scalarElementType(Type *type) const noexcept;
   IRType scalarType(Type *type) const noexcept;

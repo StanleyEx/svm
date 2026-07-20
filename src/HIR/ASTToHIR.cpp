@@ -7,6 +7,73 @@
 #include <vector>
 
 namespace svm::ir {
+namespace {
+
+void appendInitSegment(std::vector<InitSegment> &segments, u64 count,
+                       ExprNode **expressions) {
+  if (count == 0)
+    return;
+  if (!expressions && !segments.empty() && !segments.back().initExprs) {
+    segments.back().initCount += count;
+    return;
+  }
+  segments.push_back(InitSegment{count, expressions});
+}
+
+// 保持源码初始化顺序 仅在逻辑下标映射不连续处插入压缩零段
+bool remapArrayInitializer(const ArrayType *array, InitSegment *sourceSegments,
+                           u32 sourceSegmentCount,
+                           std::vector<InitSegment> &result) {
+  const u64 logicalSize = array->logicalSize();
+  const u64 physicalSize = array->totalSize();
+  if (physicalSize < logicalSize)
+    return false;
+
+  u64 logicalOffset = 0;
+  u64 physicalOffset = 0;
+  for (u32 segmentIndex = 0; segmentIndex < sourceSegmentCount;
+       ++segmentIndex) {
+    InitSegment &source = sourceSegments[segmentIndex];
+    if (source.initCount > logicalSize - logicalOffset)
+      return false;
+
+    if (!source.initExprs) {
+      logicalOffset += source.initCount;
+      const u64 nextPhysical = logicalOffset == logicalSize
+                                   ? physicalSize
+                                   : array->physicalOffset(logicalOffset);
+      if (nextPhysical < physicalOffset)
+        return false;
+      appendInitSegment(result, nextPhysical - physicalOffset, nullptr);
+      physicalOffset = nextPhysical;
+      continue;
+    }
+
+    u64 consumed = 0;
+    while (consumed < source.initCount) {
+      const u64 target = array->physicalOffset(logicalOffset);
+      if (target < physicalOffset)
+        return false;
+      appendInitSegment(result, target - physicalOffset, nullptr);
+
+      u64 run = 1;
+      while (consumed + run < source.initCount &&
+             array->physicalOffset(logicalOffset + run) == target + run)
+        ++run;
+      appendInitSegment(result, run, source.initExprs + consumed);
+      consumed += run;
+      logicalOffset += run;
+      physicalOffset = target + run;
+    }
+  }
+
+  if (physicalOffset > physicalSize)
+    return false;
+  appendInitSegment(result, physicalSize - physicalOffset, nullptr);
+  return result.size() <= std::numeric_limits<u32>::max();
+}
+
+} // namespace
 
 ASTToHIR::ASTToHIR(Arena &arena, DiagnosticEngine &diagnostics) noexcept
     : arena_(arena), diagnostics_(diagnostics) {}
@@ -87,7 +154,7 @@ void ASTToHIR::registerGlobals(CompUnit *unit) {
     Global packed;
     packed.type = elementType;
     packed.numElements = static_cast<u32>(wideCount);
-    if (!packGlobalInit(segments, segmentCount, &packed,
+    if (!packGlobalInit(segments, segmentCount, array, &packed,
                         declaration->getLocation()))
       continue;
     Global *global = module_->newGlobal(
@@ -454,6 +521,14 @@ Inst *ASTToHIR::lowerLocalStorage(const ASTNode *declaration, Type *type,
     return storage;
   }
 
+  std::vector<InitSegment> physicalSegments;
+  if (!remapArrayInitializer(array, segments, segmentCount, physicalSegments)) {
+    diagnose(declaration->getLocation(), "malformed array initializer layout");
+    return storage;
+  }
+  segments = physicalSegments.data();
+  segmentCount = static_cast<u32>(physicalSegments.size());
+
   u64 validatedCount = 0;
   for (u32 segment = 0; segment < segmentCount; ++segment) {
     if (segments[segment].initCount >
@@ -472,7 +547,7 @@ Inst *ASTToHIR::lowerLocalStorage(const ASTNode *declaration, Type *type,
   info->elementType = elementType;
   info->segments.reserve(resultSegmentCount);
   u64 baseOffset = 0;
-  // 初始化锚点只描述逻辑区间和值 暂不展开为逐元素Store
+  // 初始化锚点只描述物理区间和值 暂不展开为逐元素Store
   // 后续Pass可以优化为批量清零或常量物化等
   for (u32 segment = 0; segment < segmentCount; ++segment) {
     InitSegment &source = segments[segment];
@@ -798,15 +873,18 @@ Inst *ASTToHIR::lowerAddress(LValueExpr *expr) {
     return nullptr;
   }
   const i32 *tailDims = nullptr;
+  const i32 *physicalTailDims = nullptr;
   u32 tailCount = 0;
   u32 firstDim = 0;
   if (auto *array = dyn_cast<ArrayType>(declaredType)) {
     firstDim = array->dimCount ? static_cast<u32>(array->dims[0]) : 0;
     tailDims = array->dimCount > 1 ? array->dims + 1 : nullptr;
+    physicalTailDims = array->dimCount > 1 ? array->physicalDims + 1 : nullptr;
     tailCount = array->dimCount > 1 ? array->dimCount - 1 : 0;
   } else if (auto *pointer = dyn_cast<PointerType>(declaredType)) {
     if (auto *array = dyn_cast<ArrayType>(pointer->pointee)) {
       tailDims = array->dims;
+      physicalTailDims = array->physicalDims;
       tailCount = array->dimCount;
     }
   }
@@ -822,7 +900,7 @@ Inst *ASTToHIR::lowerAddress(LValueExpr *expr) {
   std::vector<u32> dims(count);
   u64 stride = static_cast<u32>(typeSizeBytes(elementType));
   for (u32 dimension = 0; dimension < tailCount; ++dimension)
-    stride *= static_cast<u32>(tailDims[dimension]);
+    stride *= static_cast<u32>(physicalTailDims[dimension]);
   for (u32 index = 0; index < count; ++index) {
     if (stride > std::numeric_limits<u32>::max()) {
       diagnose(expr->getLocation(), "array stride exceeds HIR limits");
@@ -838,7 +916,7 @@ Inst *ASTToHIR::lowerAddress(LValueExpr *expr) {
       return nullptr;
     indices[index] = builder_->castTo(indices[index], TY_I32);
     if (index < tailCount)
-      stride /= static_cast<u32>(tailDims[index]);
+      stride /= static_cast<u32>(physicalTailDims[index]);
   }
   setSourceLocation(expr);
   return builder_->emitArrayIndex(base, indices.data(), count, elementType,
@@ -866,7 +944,8 @@ Inst *ASTToHIR::lowerCondition(ExprNode *expr) {
 }
 
 bool ASTToHIR::packGlobalInit(InitSegment *segments, u32 segmentCount,
-                              Global *global, SourceLocation location) {
+                              const ArrayType *array, Global *global,
+                              SourceLocation location) {
   if (!segmentCount) {
     global->initSegment = nullptr;
     global->initSegmentCount = 0;
@@ -876,6 +955,18 @@ bool ASTToHIR::packGlobalInit(InitSegment *segments, u32 segmentCount,
     diagnose(location, "global initializer segments are missing");
     return false;
   }
+
+  std::vector<InitSegment> physicalSegments;
+  if (array) {
+    if (!remapArrayInitializer(array, segments, segmentCount,
+                               physicalSegments)) {
+      diagnose(location, "malformed array initializer layout");
+      return false;
+    }
+    segments = physicalSegments.data();
+    segmentCount = static_cast<u32>(physicalSegments.size());
+  }
+
   struct PackedSegment {
     u32 count = 0;             // 段元素数
     std::vector<i32> integers; // 整数初始化值
