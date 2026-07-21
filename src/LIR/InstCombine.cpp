@@ -63,7 +63,9 @@ public:
 
   bool replace(Inst *victim, Inst *replacement) {
     std::vector<Inst *> oldOperands = operandsOf(victim);
-    VERIFY(builder_.replace(victim, replacement), "combine replacement failed");
+    const bool replaced = builder_.replace(victim, replacement) ||
+                          replaceWithLoopPhi(victim, replacement);
+    VERIFY(replaced, "combine replacement failed");
     eraseDeadScalarChain(std::move(oldOperands));
     markFactsStale();
     return true;
@@ -104,6 +106,33 @@ public:
   }
 
 private:
+  // 只允许把回边恒等更新折叠成支配该回边的自引用Phi
+  bool replaceWithLoopPhi(Inst *victim, Inst *replacement) {
+    if (!victim || !replacement || replacement->getOp() != OP_PHI ||
+        victim->getType() != replacement->getType() ||
+        !function_->ownsValue(victim) || !function_->ownsValue(replacement) ||
+        !victim->parentBlock() || !replacement->parentBlock())
+      return false;
+
+    const DominatorTree &dominators =
+        passContext_.get<DomAnalysis>(function_).tree;
+    bool hasSelfIncoming = false;
+    for (u32 index = 0; index < replacement->getOperandCount(); ++index) {
+      if (replacement->getArg(index) != victim)
+        continue;
+      BasicBlock *predecessor = replacement->getIncomingBlock(index);
+      if (!predecessor ||
+          !dominators.dominates(replacement->parentBlock(), predecessor))
+        return false;
+      hasSelfIncoming = true;
+    }
+    if (!hasSelfIncoming)
+      return false;
+
+    replaceAllUsesWith(function_, victim, replacement);
+    return victim->eraseFromBlock();
+  }
+
   static std::vector<Inst *> operandsOf(Inst *inst) {
     std::vector<Inst *> operands;
     operands.reserve(inst->getOperandCount());
