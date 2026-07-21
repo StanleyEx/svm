@@ -186,9 +186,28 @@ int run(const CompilerOptions &options, std::string_view sourceView,
 
     passManager.addPass<SimplifyCFGPass>();
     passManager.addPass<Mem2RegPass>();
+
+    // 先缩小函数体 进行一轮函数级优化
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<InstCombinePass>();
+    passManager.addPass<SCCPPass>();
+    passManager.addPass<GVNPass>();
+    passManager.addPass<DCEPass>();
+    passManager.addPass<FunctionSpecializationPass>();
+    passManager.addPass<DeadFunctionEliminationPass>();
+    passManager.addPass<InlinePass>();
+    passManager.addPass<DeadFunctionEliminationPass>();
+    passManager.addPass<GlobalVariableLocalizationPass>();
+    passManager.addPass<DeadArgumentEliminationPass>();
+    passManager.addPass<DeadFunctionEliminationPass>();
+
+    // GVL 暴露的局部聚合应在进入主优化循环前立即拆分并提升
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<SROAPass>();
+    passManager.addPass<Mem2RegPass>();
     passManager.addPass<SimplifyCFGPass>();
 
-    for (u32 iteration = 0; iteration < 2; ++iteration) {
+    for (u32 iteration = 0; iteration < 3; ++iteration) {
       passManager.addPass<InstCombinePass>();
       passManager.addPass<SCCPPass>();
       passManager.addPass<DCEPass>();
@@ -205,6 +224,16 @@ int run(const CompilerOptions &options, std::string_view sourceView,
       passManager.addPass<DCEPass>();
       passManager.addPass<SimplifyCFGPass>();
     }
+
+    // 前端展开和标量优化显式暴露的常量全局初始化
+    passManager.addPass<InstCombinePass>();
+    passManager.addPass<SCCPPass>();
+    passManager.addPass<ReassociatePass>();
+    passManager.addPass<AggressiveConstFoldPass>();
+    passManager.addPass<DCEPass>();
+    passManager.addPass<SROAPass>();
+    passManager.addPass<Mem2RegPass>();
+
     passManager.addPass<InstCombinePass>();
     passManager.addPass<SCCPPass>();
     passManager.addPass<DCEPass>();
@@ -225,6 +254,9 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     passManager.addPass<InstCombinePass>();
     passManager.addPass<SimplifyCFGPass>();
     passManager.addPass<DCEPass>();
+
+    // Lowering 之前合并全局变量
+    passManager.addPass<GlobalMergePass>();
 
     if (options.stage == Stage::LirDump) {
       passManager.addPass<PrintLLVMIR>(output);
