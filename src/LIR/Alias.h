@@ -72,7 +72,7 @@ public:
                               const MemoryLocation &reader) const;
   // 未知访问宽度查询
   bool mayOverlapForStoreElim(Inst *writer, Inst *reader) const;
-  // 查询covering常量区间是否完整覆盖covered
+  // 查询同一地址或同根常量区间是否完整覆盖covered
   bool fullyCovers(const MemoryLocation &covering,
                    const MemoryLocation &covered) const;
   // 查询地址是否与本函数所有栈对象互不别名

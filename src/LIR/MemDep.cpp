@@ -194,15 +194,20 @@ Inst *MemDepOracle::findNextKillerStore(Inst *store,
       }
 
       if (op == OP_LOAD) {
-        if (aliasInfo_->mayOverlapForStoreElim(
-                target, MemoryLocation::fromMemoryInstruction(current)))
+        AliasQuery query;
+        query.contextBlock = current->parentBlock();
+        if (aliasInfo_->alias(target,
+                              MemoryLocation::fromMemoryInstruction(current),
+                              query) != AliasResult::NoAlias)
           return nullptr;
       } else if (op == OP_STORE) {
         const MemoryLocation written =
             MemoryLocation::fromMemoryInstruction(current);
         if (aliasInfo_->fullyCovers(written, target))
           return current;
-        if (aliasInfo_->mayOverlapForStoreElim(target, written))
+        AliasQuery query;
+        query.contextBlock = current->parentBlock();
+        if (aliasInfo_->alias(target, written, query) != AliasResult::NoAlias)
           return nullptr;
       } else if (isCall(current) && (mayReadCall(current, target) ||
                                      mayWriteCall(current, target))) {

@@ -466,11 +466,15 @@ bool AliasInfo::mayOverlapForStoreElim(Inst *writer, Inst *reader) const {
 
 bool AliasInfo::fullyCovers(const MemoryLocation &covering,
                             const MemoryLocation &covered) const {
-  if (!covering.pointer || !covered.pointer || conservative_)
+  if (!covering.pointer || !covered.pointer)
     return false;
   const std::optional<i64> coveringSize = usableAccessSize(covering);
   const std::optional<i64> coveredSize = usableAccessSize(covered);
   if (!coveringSize || !coveredSize)
+    return false;
+  if (covering.pointer == covered.pointer)
+    return *coveringSize >= *coveredSize;
+  if (conservative_)
     return false;
   const PointerInfo coveringInfo = info(covering.pointer);
   const PointerInfo coveredInfo = info(covered.pointer);
