@@ -2,6 +2,7 @@
 #include "DeepCopy.h"
 #include "IR.h"
 #include "LIRPass.h"
+#include "PressureOracle.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -307,20 +308,6 @@ std::string keySuffix(const SpecializationKey &key) {
   return result;
 }
 
-u32 countInstructions(const Function *function) noexcept {
-  if (!function || !function->region)
-    return 0;
-  u32 count = 0;
-  for (BasicBlock *block = function->region->first; block;
-       block = block->next()) {
-    for (Inst *phi = block->firstPhi(); phi; phi = phi->next())
-      ++count;
-    for (Inst *inst = block->firstInst(); inst; inst = inst->next())
-      ++count;
-  }
-  return count;
-}
-
 bool isSpecializable(const Function *function) noexcept {
   if (!function || function->isExtern || !function->region ||
       !function->region->first ||
@@ -440,15 +427,23 @@ struct SpecializationRun {
   u32 cloneInstructionLimit = 0;    // 单函数复制体积上限
   u32 uniformCallSiteThreshold = 2; // uniform tuple收益阈值
   u32 clonesCreated = 0;            // 已创建clone数
+  PressureOracle *oracle = nullptr; // 共享体积和压力信号源
 
   bool tryOnce(const CallIndex &calls) {
     for (Function *function = module->functionHead; function;
          function = function->next) {
+      const GrowthHint growth =
+          oracle ? oracle->hint(function, 0) : GrowthHint{};
+      const u32 instructionCount =
+          growth.functionLiveInstructions > 0
+              ? static_cast<u32>(growth.functionLiveInstructions)
+              : 0;
       const GlobalSummaryResult &summary =
           context->get<GlobalSummaryAnalysis>(module).result;
       if (!isSpecializable(function) || function->phase != IRPhase::LIR ||
           summary.getEntryPoint() == function ||
-          countInstructions(function) > cloneInstructionLimit)
+          instructionCount > cloneInstructionLimit ||
+          growth.overall == PressureLevel::UnknownLarge)
         continue;
       const auto found = calls.byCallee.find(function);
       if (found == calls.byCallee.end() || found->second.empty())
@@ -464,6 +459,7 @@ struct SpecializationRun {
         continue;
 
       bool changed = false;
+      i32 addedInstructions = 0;
       for (const KeyGroup &group : groups) {
         const ParamRewrite rewrite =
             rewriteForKey(function->paramCount, group.key);
@@ -474,6 +470,7 @@ struct SpecializationRun {
           continue;
         if (created) {
           ++clonesCreated;
+          addedInstructions += static_cast<i32>(instructionCount);
           context->notifyFunctionTopologyChanged(clone);
         }
 
@@ -487,8 +484,11 @@ struct SpecializationRun {
         VERIFY(routed, "特殊化克隆必须至少拥有一个匹配的调用点");
         changed = true;
       }
-      if (changed)
+      if (changed) {
+        if (oracle && addedInstructions > 0)
+          oracle->recordApplied(nullptr, addedInstructions);
         return true;
+      }
     }
     return false;
   }
@@ -511,12 +511,14 @@ PassResult FunctionSpecializationPass::run(Module *module,
   if (!module || cloneLimit_ == 0 || cloneInstructionLimit_ == 0)
     return PassResult::noChange();
 
+  PressureOracle oracle(module);
   SpecializationRun run{module,
                         &context,
                         cloneLimit_,
                         cloneInstructionLimit_,
                         uniformCallSiteThreshold_,
-                        0};
+                        0,
+                        &oracle};
   bool changed = false;
   while (true) {
     const CallIndex calls = collectCalls(module);
