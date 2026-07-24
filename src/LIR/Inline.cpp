@@ -2,6 +2,7 @@
 #include "DeepCopy.h"
 #include "IR.h"
 #include "LIRPass.h"
+#include "PressureOracle.h"
 
 #include <algorithm>
 #include <limits>
@@ -17,20 +18,8 @@ constexpr u32 kMaxInlineIterations = 8;
 constexpr u32 kMaxCallerInstructions = 20000;
 constexpr u32 kRecursiveInstructionLimit = 128;
 constexpr u32 kRecursiveExpansionsPerFunction = 1;
-
-u32 countInstructions(const Function *function) noexcept {
-  if (!function || !function->region)
-    return 0;
-  u32 count = 0;
-  for (BasicBlock *block = function->region->first; block;
-       block = block->next()) {
-    for (Inst *phi = block->firstPhi(); phi; phi = phi->next())
-      ++count;
-    for (Inst *inst = block->firstInst(); inst; inst = inst->next())
-      ++count;
-  }
-  return count;
-}
+constexpr u32 kPressureRejectCalleeInstructions = 128;
+constexpr u32 kTinyInlineInstructions = 36;
 
 u32 countInstructionsRejectingSelfRecursion(const Function *function) noexcept {
   if (!function || !function->region || !function->region->first)
@@ -393,7 +382,8 @@ bool inlineCall(Inst *call) {
 }
 
 struct InlineCandidate {
-  Inst *call = nullptr; // 调用点快照
+  Inst *call = nullptr;      // 调用点快照
+  u32 addedInstructions = 0; // 预计复制的指令数
 };
 
 std::unordered_map<Function *, u32> countCallSites(Module *module) {
@@ -412,6 +402,7 @@ std::unordered_map<Function *, u32> countCallSites(Module *module) {
 
 bool runInlining(Module *module, PassContext &context, u32 threshold) {
   bool changedAny = false;
+  PressureOracle oracle(module);
 
   std::vector<Function *> initialFunctions;
   for (Function *function = module->functionHead; function;
@@ -448,7 +439,7 @@ bool runInlining(Module *module, PassContext &context, u32 threshold) {
       computeUses(caller);
 
       std::vector<InlineCandidate> candidates;
-      u64 projectedSize = countInstructions(caller);
+      i32 projectedAdded = 0;
       for (BasicBlock *block = caller->region->first; block;
            block = block->next()) {
         for (Inst *inst = block->firstInst(); inst; inst = inst->next()) {
@@ -478,22 +469,42 @@ bool runInlining(Module *module, PassContext &context, u32 threshold) {
           const u32 regularCount =
               countInstructionsRejectingSelfRecursion(callee);
           if (regularCount <= dynamicThreshold) {
-            if (projectedSize + regularCount > kMaxCallerInstructions)
+            const i32 candidateAdded =
+                projectedAdded + static_cast<i32>(regularCount);
+            const GrowthHint growth = oracle.hint(caller, candidateAdded);
+            if (growth.functionAfter > static_cast<i32>(kMaxCallerInstructions))
               continue;
-            projectedSize += regularCount;
-            candidates.push_back({inst});
+            const bool tiny = regularCount <= kTinyInlineInstructions;
+            const bool ignorePressure =
+                tiny || uniqueCall || constantArguments || execution.isOnce();
+            const bool badPressure =
+                growth.overall == PressureLevel::High ||
+                growth.overall == PressureLevel::UnknownLarge;
+            if (!ignorePressure && badPressure &&
+                regularCount > kPressureRejectCalleeInstructions)
+              continue;
+            projectedAdded = candidateAdded;
+            candidates.push_back({inst, regularCount});
             continue;
           }
 
-          const u32 recursiveCount = countInstructions(callee);
+          const i32 recursiveInstructions =
+              oracle.hint(callee, 0).functionLiveInstructions;
+          const u32 recursiveCount =
+              recursiveInstructions > 0
+                  ? static_cast<u32>(recursiveInstructions)
+                  : 0;
+          const i32 candidateAdded =
+              projectedAdded + static_cast<i32>(recursiveCount);
           if (changedAny ||
               !canExpandDirectRecursion(inst, summary, recursiveCount,
                                         recursiveExpansions) ||
-              projectedSize + recursiveCount > kMaxCallerInstructions)
+              oracle.hint(caller, candidateAdded).functionAfter >
+                  static_cast<i32>(kMaxCallerInstructions))
             continue;
-          projectedSize += recursiveCount;
+          projectedAdded = candidateAdded;
           ++recursiveExpansions[callee];
-          candidates.push_back({inst});
+          candidates.push_back({inst, recursiveCount});
         }
       }
 
@@ -502,6 +513,8 @@ bool runInlining(Module *module, PassContext &context, u32 threshold) {
           continue;
         if (!inlineCall(candidate.call))
           continue;
+        oracle.recordApplied(caller,
+                             static_cast<i32>(candidate.addedInstructions));
         changedIteration = true;
         changedAny = true;
       }
