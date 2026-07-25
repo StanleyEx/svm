@@ -140,6 +140,12 @@ private:
     SCEVExpr *offset = nullptr; // 需要补加的循环不变量
   };
 
+  struct RangeMemoEntry {
+    u32 depth = 0;  // 该结果对应的剩余递归深度
+    I32Range range; // 当前顶层查询内的局部值域
+  };
+  using RangeMemo = std::unordered_map<SCEVExpr *, std::vector<RangeMemoEntry>>;
+
   Function *function_ = nullptr;
   const LoopInfo *loopInfo_ = nullptr;
   const DominatorTree *dominatorTree_ = nullptr;
@@ -188,10 +194,12 @@ private:
   SCEVExpr *getNegExpr(SCEVExpr *expr) const;
 
   I32Range computeI32Range(SCEVExpr *expr, const RangeQuery &query, u32 depth,
-                           std::unordered_set<SCEVExpr *> &onStack) const;
+                           std::unordered_set<SCEVExpr *> &onStack,
+                           RangeMemo &memo) const;
   I32Range computeAddRecI32Range(SCEVExpr *expr, const RangeQuery &query,
                                  u32 depth,
-                                 std::unordered_set<SCEVExpr *> &onStack) const;
+                                 std::unordered_set<SCEVExpr *> &onStack,
+                                 RangeMemo &memo) const;
   Congruence computeCongruence(SCEVExpr *expr, const CongruenceQuery &query,
                                u32 depth,
                                std::unordered_set<SCEVExpr *> &onStack) const;

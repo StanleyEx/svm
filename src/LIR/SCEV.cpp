@@ -1,12 +1,11 @@
 #include "SCEV.h"
 #include "Analysis.h"
+#include "LoopShape.h"
 #include "Utils.h"
 
 #include <algorithm>
-#include <cassert>
 #include <functional>
 #include <limits>
-#include <optional>
 #include <utility>
 
 namespace svm::ir {
@@ -14,80 +13,6 @@ namespace {
 
 constexpr i64 kI32Min = static_cast<i64>(std::numeric_limits<i32>::min());
 constexpr i64 kI32Max = static_cast<i64>(std::numeric_limits<i32>::max());
-
-struct LoopPredicate {
-  OpCode predicate = OP_ICONST; // 继续循环时成立的规范化比较
-  SCEVExpr *tested = nullptr;   // 比较指令的被测表达式 (循环递推项或守卫初值)
-  SCEVExpr *bound = nullptr;    // 循环不变边界
-  BasicBlock *exit = nullptr;   // 比较失败时到达的退出块
-};
-
-// 将回边或守卫分支规范化为被测表达式满足边界谓词时继续循环
-std::optional<LoopPredicate>
-analyzeLoopPredicate(const SCEV *scev, const Loop *loop, Inst *terminator,
-                     SCEVExpr *wanted, BasicBlock *header,
-                     BasicBlock *expectedExit) {
-  if (!scev || !loop || !terminator || terminator->getOp() != OP_BR ||
-      !header || terminator->getOperandCount() == 0)
-    return std::nullopt;
-  Inst *condition = terminator->getArg(0);
-  if (!condition || !isIntCompare(condition->getOp()) ||
-      condition->getOperandCount() != 2)
-    return std::nullopt;
-
-  BasicBlock *trueBlock = terminator->getBr().trueBB;
-  BasicBlock *falseBlock = terminator->getBr().falseBB;
-  bool trueContinues = trueBlock == header;
-  bool falseContinues = falseBlock == header;
-  if (trueContinues == falseContinues)
-    return std::nullopt;
-
-  OpCode predicate = condition->getOp();
-  if (!trueContinues)
-    predicate = invertIntCompare(predicate);
-  if (!isIntCompare(predicate))
-    return std::nullopt;
-
-  SCEVExpr *left = scev->getSCEV(condition->getArg(0));
-  SCEVExpr *right = scev->getSCEV(condition->getArg(1));
-  if (!left || !right)
-    return std::nullopt;
-
-  const bool leftHasLoopRec = left->containsAddRecOf(loop);
-  const bool rightHasLoopRec = right->containsAddRecOf(loop);
-  SCEVExpr *tested = nullptr;
-  SCEVExpr *bound = nullptr;
-  if (leftHasLoopRec != rightHasLoopRec) {
-    if (leftHasLoopRec) {
-      tested = left;
-      bound = right;
-    } else {
-      tested = right;
-      bound = left;
-      predicate = swapCompareOperands(predicate);
-    }
-  } else if (wanted) {
-    if (left->structurallyEquals(wanted) || left->containsAddRecOf(loop)) {
-      tested = left;
-      bound = right;
-    } else if (right->structurallyEquals(wanted) ||
-               right->containsAddRecOf(loop)) {
-      tested = right;
-      bound = left;
-      predicate = swapCompareOperands(predicate);
-    }
-  }
-  if (!tested || !bound ||
-      (wanted ? !tested->structurallyEquals(wanted)
-              : !tested->containsAddRecOf(loop)) ||
-      !bound->isLoopInvariant(loop))
-    return std::nullopt;
-
-  BasicBlock *exit = trueContinues ? falseBlock : trueBlock;
-  if (expectedExit && exit != expectedExit)
-    return std::nullopt;
-  return LoopPredicate{predicate, tested, bound, exit};
-}
 
 BasicBlock *uniqueLoopEntryPredecessor(const Loop *loop) noexcept {
   if (!loop || !loop->header())
@@ -331,9 +256,10 @@ bool SCEV::proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step,
     auto latchPredicate =
         analyzeLoopPredicate(this, loop, latch ? latch->terminator() : nullptr,
                              nullptr, loop->header(), nullptr);
-    SCEVExpr *tested = latchPredicate ? latchPredicate->tested : nullptr;
-    if (latchPredicate && latchPredicate->predicate == OP_LT && tested &&
-        tested->kind == SCEVExpr::K_ADDREC && tested->addRec.loop == loop &&
+    SCEVExpr *tested = latchPredicate ? latchPredicate->testedSCEV : nullptr;
+    if (latchPredicate && latchPredicate->canonicalPredicate == OP_LT &&
+        tested && tested->kind == SCEVExpr::K_ADDREC &&
+        tested->addRec.loop == loop &&
         tested->addRec.step->structurallyEquals(step) &&
         tested->addRec.base->structurallyEquals(getAddExpr(base, step))) {
       BasicBlock *entry = uniqueLoopEntryPredecessor(loop);
@@ -341,10 +267,12 @@ bool SCEV::proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step,
       BasicBlock *guard = loopGuard(loop, entry, continueBlock);
       auto guardPredicate = analyzeLoopPredicate(
           this, loop, guard ? guard->terminator() : nullptr, base,
-          continueBlock, latchPredicate->exit);
-      const auto stopBounds = getI32Range(latchPredicate->bound).signedBounds();
-      if (guardPredicate && guardPredicate->predicate == OP_LT &&
-          guardPredicate->bound->structurallyEquals(latchPredicate->bound) &&
+          continueBlock, latchPredicate->exitTarget);
+      const auto stopBounds =
+          getI32Range(latchPredicate->boundSCEV).signedBounds();
+      if (guardPredicate && guardPredicate->canonicalPredicate == OP_LT &&
+          guardPredicate->boundSCEV->structurallyEquals(
+              latchPredicate->boundSCEV) &&
           stopBounds && stepValue <= kI32Max &&
           stopBounds->max <= kI32Max - (stepValue - 1)) {
         setNoWrap(tested);
@@ -882,14 +810,14 @@ SCEVExpr *SCEV::computeBTC(const Loop *loop) const {
     return getUnknown(nullptr);
   const auto normalized = analyzeLoopPredicate(
       this, loop, latch->terminator(), nullptr, loop->header(), nullptr);
-  if (!normalized || !normalized->tested || !normalized->bound ||
-      normalized->tested->kind != SCEVExpr::K_ADDREC ||
-      normalized->tested->addRec.loop != loop)
+  if (!normalized || !normalized->testedSCEV || !normalized->boundSCEV ||
+      normalized->testedSCEV->kind != SCEVExpr::K_ADDREC ||
+      normalized->testedSCEV->addRec.loop != loop)
     return getUnknown(nullptr);
 
-  SCEVExpr *start = normalized->tested->addRec.base;
-  SCEVExpr *step = normalized->tested->addRec.step;
-  SCEVExpr *stop = normalized->bound;
+  SCEVExpr *start = normalized->testedSCEV->addRec.base;
+  SCEVExpr *step = normalized->testedSCEV->addRec.step;
+  SCEVExpr *stop = normalized->boundSCEV;
   if (!start || !step)
     return getUnknown(nullptr);
   const IRType type = start->ty;
@@ -915,14 +843,15 @@ SCEVExpr *SCEV::computeBTC(const Loop *loop) const {
 
   if (start->isConstant() && step->isConstant() && stop->isConstant()) {
     i64 backedges = 0;
-    return computeConstantBackedges(normalized->predicate, start->cst.v,
-                                    step->cst.v, stop->cst.v, backedges)
+    return computeConstantBackedges(normalized->canonicalPredicate,
+                                    start->cst.v, step->cst.v, stop->cst.v,
+                                    backedges)
                ? getConstant(backedges, TY_I32)
                : getUnknown(nullptr);
   }
 
   // 符号闭式使用数学减法和除法, 仅在递推与合成距离均已证明无回绕时有效
-  if (!normalized->tested->nsw)
+  if (!normalized->testedSCEV->nsw)
     return getUnknown(nullptr);
 
   const auto subtract = [&](SCEVExpr *left, SCEVExpr *right) -> SCEVExpr * {
@@ -937,7 +866,7 @@ SCEVExpr *SCEV::computeBTC(const Loop *loop) const {
   };
 
   SCEVExpr *distance = nullptr;
-  switch (normalized->predicate) {
+  switch (normalized->canonicalPredicate) {
   case OP_LT:
     if (!positiveStep)
       return getUnknown(nullptr);
@@ -1037,7 +966,7 @@ SCEVExpr *SCEV::getExitValue(Inst *value, const Loop *loop) const {
 
 void SCEV::build(Function *function, FunctionAnalysisManager &manager) {
   VERIFY(function);
-  assert(function->phase == IRPhase::LIR && "SCEV requires LIR");
+  VERIFY(function->phase == IRPhase::LIR, "SCEV requires LIR");
 
   cache_.clear();
   btcCache_.clear();

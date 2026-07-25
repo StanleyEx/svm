@@ -95,7 +95,8 @@ I32Range SCEV::getI32Range(SCEVExpr *expr, const RangeQuery &q) const {
   if (!expr)
     return I32Range::unknown();
   std::unordered_set<SCEVExpr *> onStack;
-  return computeI32Range(expr, q, q.maxDepth, onStack);
+  RangeMemo memo;
+  return computeI32Range(expr, q, q.maxDepth, onStack, memo);
 }
 
 I32Range SCEV::getI32Range(Inst *v, const RangeQuery &q) const {
@@ -371,9 +372,11 @@ MathBounds SCEV::proveMathBoundsNoWrap(SCEVExpr *expr,
   return MathBounds::none();
 }
 
-// 仅默认深度的无上下文顶层查询可读写缓存 深度耗尽或遇环时不写缓存
+// 仅默认深度的无上下文顶层查询可读写全局缓存
+// 每次顶层查询另按(expr,depth)记忆共享子图 避免DAG重复展开
 I32Range SCEV::computeI32Range(SCEVExpr *expr, const RangeQuery &q, u32 depth,
-                               std::unordered_set<SCEVExpr *> &onStack) const {
+                               std::unordered_set<SCEVExpr *> &onStack,
+                               RangeMemo &memo) const {
   const bool cacheReadable = q.contextBlock == nullptr &&
                              q.predicateContext == nullptr &&
                              q.maxDepth == 64 && depth == q.maxDepth;
@@ -384,6 +387,11 @@ I32Range SCEV::computeI32Range(SCEVExpr *expr, const RangeQuery &q, u32 depth,
   }
   if (depth == 0 || onStack.count(expr)) // 深度上限 / 环 -> 兜底, 不缓存
     return widenForTy(expr->ty);
+
+  if (const auto found = memo.find(expr); found != memo.end())
+    for (const RangeMemoEntry &entry : found->second)
+      if (entry.depth == depth)
+        return entry.range;
 
   onStack.insert(expr);
   I32Range r;
@@ -424,44 +432,47 @@ I32Range SCEV::computeI32Range(SCEVExpr *expr, const RangeQuery &q, u32 depth,
 
   case SCEVExpr::K_ADD: {
     // 左折叠 i32 环形加法 I32Range::add 能精确处理回绕单点和跨界弧
-    r = computeI32Range(expr->nary.ops[0], q, depth - 1, onStack);
+    r = computeI32Range(expr->nary.ops[0], q, depth - 1, onStack, memo);
     for (u32 i = 1; i < expr->nary.ops.size() && !r.isUnknown(); ++i) {
-      I32Range t = computeI32Range(expr->nary.ops[i], q, depth - 1, onStack);
+      I32Range t =
+          computeI32Range(expr->nary.ops[i], q, depth - 1, onStack, memo);
       r = r.add(t);
     }
     break;
   }
 
   case SCEVExpr::K_MUL: {
-    r = computeI32Range(expr->nary.ops[0], q, depth - 1, onStack);
+    r = computeI32Range(expr->nary.ops[0], q, depth - 1, onStack, memo);
     for (u32 i = 1; i < expr->nary.ops.size() && !r.isUnknown(); ++i) {
-      I32Range t = computeI32Range(expr->nary.ops[i], q, depth - 1, onStack);
+      I32Range t =
+          computeI32Range(expr->nary.ops[i], q, depth - 1, onStack, memo);
       r = r.multiply(t);
     }
     break;
   }
 
   case SCEVExpr::K_SDIV: {
-    I32Range a = computeI32Range(expr->bin.lhs, q, depth - 1, onStack);
-    I32Range b = computeI32Range(expr->bin.rhs, q, depth - 1, onStack);
+    I32Range a = computeI32Range(expr->bin.lhs, q, depth - 1, onStack, memo);
+    I32Range b = computeI32Range(expr->bin.rhs, q, depth - 1, onStack, memo);
     r = a.sdiv(b);
     break;
   }
 
   case SCEVExpr::K_SREM: {
     // 有符号余数值域不做模数正则化, 负余数必须保留
-    I32Range a = computeI32Range(expr->bin.lhs, q, depth - 1, onStack);
-    I32Range b = computeI32Range(expr->bin.rhs, q, depth - 1, onStack);
+    I32Range a = computeI32Range(expr->bin.lhs, q, depth - 1, onStack, memo);
+    I32Range b = computeI32Range(expr->bin.rhs, q, depth - 1, onStack, memo);
     r = a.srem(b);
     break;
   }
 
   case SCEVExpr::K_ADDREC:
-    r = computeAddRecI32Range(expr, q, depth, onStack);
+    r = computeAddRecI32Range(expr, q, depth, onStack, memo);
     break;
   }
 
   onStack.erase(expr);
+  memo[expr].push_back({depth, r});
   if (cacheReadable)
     rangeCache_[expr] = r;
   return r;
@@ -470,13 +481,14 @@ I32Range SCEV::computeI32Range(SCEVExpr *expr, const RangeQuery &q, u32 depth,
 // AddRec 值域按 base + step * [0, TC-1] 在 i32 环形集合域计算
 // 该计算覆盖所有中间迭代, 遇回绕时只会保守扩宽
 // 未知迭代次数仅在已证明无回绕且步长方向单调时保留单侧范围
-I32Range
-SCEV::computeAddRecI32Range(SCEVExpr *expr, const RangeQuery &q, u32 depth,
-                            std::unordered_set<SCEVExpr *> &onStack) const {
+I32Range SCEV::computeAddRecI32Range(SCEVExpr *expr, const RangeQuery &q,
+                                     u32 depth,
+                                     std::unordered_set<SCEVExpr *> &onStack,
+                                     RangeMemo &memo) const {
   I32Range baseRange =
-      computeI32Range(expr->addRec.base, q, depth - 1, onStack);
+      computeI32Range(expr->addRec.base, q, depth - 1, onStack, memo);
   I32Range stepRange =
-      computeI32Range(expr->addRec.step, q, depth - 1, onStack);
+      computeI32Range(expr->addRec.step, q, depth - 1, onStack, memo);
   if (baseRange.isUnknown() || stepRange.isUnknown())
     return I32Range::unknown();
 
