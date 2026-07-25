@@ -5,6 +5,7 @@
 #include "DomAnalysis.h"
 #include "GlobalSummary.h"
 #include "LoopInfo.h"
+#include "LoopShape.h"
 #include "PassManager.h"
 #include "SCEV.h"
 
@@ -56,6 +57,17 @@ struct LoopInfoAnalysis {
   }
 };
 
+struct LoopShapeAnalysis {
+  LoopShapeInfo info;
+
+  static const AnalysisKey *ID() noexcept {
+    static AnalysisKey key;
+    return &key;
+  }
+  void run(Function *function, FunctionAnalysisManager &manager);
+  bool invalidate(Function *function, const PreservedAnalyses &preserved) const;
+};
+
 struct SCEVAnalysis {
   SCEV info;
   static const AnalysisKey *ID() noexcept {
@@ -70,7 +82,8 @@ struct SCEVAnalysis {
         preserved.preservesCFGAnalyses() ||
         (preserved.preserves<DomAnalysis>() &&
          preserved.preserves<LoopInfoAnalysis>());
-    return !preserved.preserves(ID()) || !dependenciesPreserved;
+    return !preserved.preserves(ID()) || !preserved.preservesSSAForm() ||
+           !dependenciesPreserved;
   }
 };
 
@@ -98,7 +111,8 @@ struct AliasAnalysis {
         preserved.preservesCFGAnalyses() ||
         (preserved.preserves<DomAnalysis>() &&
          preserved.preserves<LoopInfoAnalysis>());
-    return !preserved.preserves<SCEVAnalysis>() || !scalarDependenciesPreserved;
+    return !preserved.preserves<SCEVAnalysis>() ||
+           !preserved.preservesSSAForm() || !scalarDependenciesPreserved;
   }
 };
 
