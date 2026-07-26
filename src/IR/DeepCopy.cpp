@@ -773,8 +773,6 @@ void DeepCopy::addTranslatedExitPhiIncomings(
         if (value)
           values.push_back({phi, translate(value)});
       });
-      if (values.empty())
-        return;
       const bool added = CFGEditor::addPhiEdgeValues(
           function, exit, translateBlock(sourcePred), values);
       if (!added)
