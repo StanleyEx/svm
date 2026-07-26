@@ -1083,6 +1083,12 @@ public:
   static bool setPhiEdgeValues(Function *function, BasicBlock *succ,
                                BasicBlock *pred,
                                std::initializer_list<PhiEdgeValue> values);
+  // 迁移predecessor/Phi元数据并覆写给定值 不改终结符物理边
+  // 调用方必须在同一CFG事务中完成oldPred/newPred的后继槽改写
+  static bool
+  moveAndSetPhiEdgeValues(Function *function, BasicBlock *succ,
+                          BasicBlock *oldPred, BasicBlock *newPred,
+                          const std::vector<PhiEdgeValue> &values = {});
   // 为终结符中已存在 元数据中尚未登记的新边追加完整Phi列
   static bool addPhiEdgeValues(Function *function, BasicBlock *succ,
                                BasicBlock *pred,

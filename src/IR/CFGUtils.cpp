@@ -59,6 +59,28 @@ bool collectPhiPlan(BasicBlock *succ,
   return plan.size() == phiCount;
 }
 
+// CFG批量事务中物理边和predecessor元数据可暂时错位 此检查只验证元数据自身
+bool hasAlignedIncomingMetadata(BasicBlock *block) {
+  if (!block || !block->parentRegion)
+    return false;
+  std::unordered_set<BasicBlock *> predecessors;
+  for (u32 index = 0; index < block->getPredecessorCount(); ++index) {
+    BasicBlock *predecessor = block->getPredecessor(index);
+    if (!predecessor || predecessor->parentRegion != block->parentRegion ||
+        !predecessors.insert(predecessor).second)
+      return false;
+  }
+  for (Inst *phi = block->firstPhi(); phi; phi = phi->next()) {
+    if (phi->getOperandCount() != block->getPredecessorCount())
+      return false;
+    for (u32 index = 0; index < phi->getOperandCount(); ++index)
+      if (phi->getIncomingBlock(index) != block->getPredecessor(index) ||
+          !phi->getArg(index))
+        return false;
+  }
+  return true;
+}
+
 } // namespace
 
 std::vector<BasicBlock *> computeRPO(Function *function) {
@@ -461,6 +483,38 @@ bool CFGEditor::setPhiEdgeValues(Function *function, BasicBlock *succ,
                                  std::initializer_list<PhiEdgeValue> values) {
   return setPhiEdgeValues(function, succ, pred,
                           std::vector<PhiEdgeValue>(values));
+}
+
+bool CFGEditor::moveAndSetPhiEdgeValues(
+    Function *function, BasicBlock *succ, BasicBlock *oldPred,
+    BasicBlock *newPred, const std::vector<PhiEdgeValue> &values) {
+  if (!isFlatCFGBlock(function, succ) || !isFlatCFGBlock(function, oldPred) ||
+      !isFlatCFGBlock(function, newPred) || oldPred == newPred ||
+      !hasAlignedIncomingMetadata(succ))
+    return false;
+  const u32 oldIndex = findPredecessorIndex(succ, oldPred);
+  if (oldIndex == std::numeric_limits<u32>::max() ||
+      hasPredecessorSlot(succ, newPred))
+    return false;
+
+  std::unordered_map<Inst *, Inst *> plan;
+  plan.reserve(values.size());
+  for (const PhiEdgeValue &entry : values)
+    if (!entry.phi || entry.phi->getOp() != OP_PHI ||
+        entry.phi->parentBlock() != succ || !entry.value ||
+        !plan.emplace(entry.phi, entry.value).second)
+      return false;
+
+  for (Inst *phi = succ->phiFirst_; phi; phi = phi->next_) {
+    assert(oldIndex < phi->operandCount_ &&
+           phi->incoming_[oldIndex] == oldPred);
+    phi->incoming_[oldIndex] = newPred;
+    if (const auto found = plan.find(phi); found != plan.end())
+      phi->setArg(oldIndex, found->second);
+  }
+  succ->predecessors_[oldIndex] = newPred;
+  assert(hasAlignedIncomingMetadata(succ));
+  return true;
 }
 
 bool CFGEditor::rewriteSuccessorEdges(BasicBlock *pred, BasicBlock *oldSucc,
