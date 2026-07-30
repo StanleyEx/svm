@@ -67,6 +67,15 @@ constexpr u32 bitWidth(u64 value) noexcept {
   return width;
 }
 
+constexpr bool fitsI32(i64 value) noexcept {
+  return value >= std::numeric_limits<i32>::min() &&
+         value <= std::numeric_limits<i32>::max();
+}
+
+constexpr bool fitsI32(i64 lo, i64 hi) noexcept {
+  return fitsI32(lo) && fitsI32(hi);
+}
+
 template <typename Float,
           std::enable_if_t<std::is_floating_point_v<Float>, int> = 0>
 bool canConvertToI32(Float value) noexcept {

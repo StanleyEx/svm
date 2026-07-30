@@ -19,16 +19,8 @@ namespace ir {
 // i32 值域直接在回绕集合域计算
 namespace {
 
-constexpr i64 kI32Min = INT32_MIN;
-constexpr i64 kI32Max = INT32_MAX;
 constexpr u64 kI32Modulus = u64{1} << 32;          // i32 回绕模数
 constexpr u64 kMaxSupportedModulus = u64{1} << 63; // 与 Congruence 上限一致
-
-inline bool inI32(i64 v) noexcept { return v >= kI32Min && v <= kI32Max; }
-
-inline bool inI32Range(i64 lo, i64 hi) noexcept {
-  return inI32(lo) && inI32(hi);
-}
 
 MathBounds internalMathBounds(i64 min, i64 max) noexcept {
   return min <= max ? MathBounds{true, min, max, NoWrapInfo{}}
@@ -193,13 +185,11 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
   if (!expr || depth > q.maxDepth)
     return false;
 
-  auto fitsI32 = [](i64 lo, i64 hi) { return inI32(lo) && inI32(hi); };
-
   switch (expr->kind) {
   // 常量: 值本身即数学区间;落在 i32 即无回绕
   case SCEVExpr::K_CONSTANT:
     mathRange = internalMathBounds(expr->cst.v, expr->cst.v);
-    if (inI32(expr->cst.v)) {
+    if (fitsI32(expr->cst.v)) {
       src = NoWrapSource::RangeProof;
       return true;
     }
@@ -235,7 +225,7 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
       if (!checkedAdd(lo, r.min, lo) || !checkedAdd(hi, r.max, hi))
         return false;
     }
-    if (!inI32Range(lo, hi))
+    if (!fitsI32(lo, hi))
       return false;
     mathRange = internalMathBounds(lo, hi);
     src = NoWrapSource::RangeProof;
@@ -266,12 +256,12 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
       i64 nlo = *std::min_element(std::begin(products), std::end(products));
       i64 nhi = *std::max_element(std::begin(products), std::end(products));
       // 越出 i32 时机器求值必然回绕
-      if (!inI32Range(nlo, nhi))
+      if (!fitsI32(nlo, nhi))
         return false;
       lo = nlo;
       hi = nhi;
     }
-    if (!started || !inI32Range(lo, hi))
+    if (!started || !fitsI32(lo, hi))
       return false;
     mathRange = internalMathBounds(lo, hi);
     src = NoWrapSource::RangeProof;
@@ -334,7 +324,7 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
       T = tc - 1;
     } else if (SCEVExpr *btc = getBackedgeTakenCount(L)) {
       I32Range tr = getI32Range(btc, toRangeQuery(q));
-      if (auto tb = tr.signedBounds(); tb && tb->min >= 0 && inI32(tb->max))
+      if (auto tb = tr.signedBounds(); tb && tb->min >= 0 && fitsI32(tb->max))
         T = tb->max;
     }
     if (T < 0)
@@ -352,7 +342,7 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
     i64 smax = std::max(i64{0}, std::max(s1, s2));
     i64 lo, hi;
     if (!checkedAdd(br.min, smin, lo) || !checkedAdd(br.max, smax, hi) ||
-        !inI32Range(lo, hi))
+        !fitsI32(lo, hi))
       return false;
     mathRange = internalMathBounds(lo, hi);
     src = NoWrapSource::LoopBoundProof;
