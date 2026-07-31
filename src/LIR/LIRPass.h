@@ -13,6 +13,7 @@ DECLARE_MODULE_PASS(GlobalMergePass);
 DECLARE_MODULE_PASS(DeadArgumentEliminationPass);
 DECLARE_MODULE_PASS(DeadFunctionEliminationPass);
 DECLARE_MODULE_PASS(GlobalVariableLocalizationPass);
+DECLARE_MODULE_PASS(DSEPass);
 DECLARE_FUNCTION_PASS(Mem2RegPass);
 DECLARE_FUNCTION_PASS(ShortCircuitCanonicalizePass);
 DECLARE_FUNCTION_PASS(SwitchCanonicalizePass);
@@ -26,6 +27,34 @@ DECLARE_FUNCTION_PASS(LICMPass);
 DECLARE_FUNCTION_PASS(JumpThreadingPass);
 DECLARE_FUNCTION_PASS(IfConversionPass);
 DECLARE_FUNCTION_PASS(SROAPass);
+DECLARE_FUNCTION_PASS(LoopSimplifyPass);
+DECLARE_FUNCTION_PASS(IndVarSimpPass);
+DECLARE_FUNCTION_PASS(LSRPass);
+
+DECLARE_FUNCTION_PASS(LCSSAPass);
+DECLARE_FUNCTION_PASS(LCSSATeardownPass);
+// 对函数内所有自然循环构造Loop-Closed SSA 返回是否修改IR
+bool formLCSSA(Function *function, FunctionAnalysisManager &analyses);
+bool teardownLCSSA(Function *function);
+// 验证循环内定义仅通过退出Phi流向循环外
+bool verifyLCSSA(Function *function, FunctionAnalysisManager &analyses);
+
+class LoopUnrollPass final : public FunctionPass {
+public:
+  explicit LoopUnrollPass(i32 maxFullTripCount = 64,
+                          i32 maxFullInstructions = 1024, i32 partialFactor = 2,
+                          i32 maxPartialBodyInstructions = 100,
+                          i32 maxFunctionInstructions = 20000) noexcept;
+  std::string_view name() const noexcept override;
+  PassResult run(Function *function, PassContext &context) override;
+
+private:
+  i32 maxFullTripCount_ = 64;            // 完全展开的最大迭代次数
+  i32 maxFullInstructions_ = 1024;       // 完全展开的最大新增指令数
+  i32 partialFactor_ = 2;                // 部分展开因子
+  i32 maxPartialBodyInstructions_ = 100; // 可部分展开的最大循环体积
+  i32 maxFunctionInstructions_ = 20000;  // 展开后的函数体积上限
+};
 
 class InlinePass final : public ModulePass {
 public:
