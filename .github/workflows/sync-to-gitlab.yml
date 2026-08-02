@@ -1,0 +1,23 @@
+name: Mirror to GitLab
+
+on:
+  push:
+    branches:
+      - '*'
+    tags:
+      - '*'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to GitLab
+        run: |
+          GITLAB_REPO="gitlab.eduxiji.net/T2026000002010107/svm.git"
+          
+          git push --prune "https://oauth2:${{ secrets.GITLAB_TOKEN }}@${GITLAB_REPO}" +refs/heads/*:refs/heads/* +refs/tags/*:refs/tags/*
