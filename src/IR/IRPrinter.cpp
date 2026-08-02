@@ -1,6 +1,6 @@
-#include "HIR/HIRPass.h"
+#include "HIRPass.h"
 #include "IR.h"
-#include "LIR/LIRPass.h"
+#include "LIRPass.h"
 
 #include <cassert>
 #include <cinttypes>
