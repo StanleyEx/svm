@@ -201,7 +201,7 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     passManager.addPass<DeadArgumentEliminationPass>();
     passManager.addPass<DeadFunctionEliminationPass>();
 
-    // GVL 暴露的局部聚合应在进入主优化循环前立即拆分并提升
+    // GVL 暴露局部小数组的在进入主优化循环前立即拆分并提升
     passManager.addPass<SimplifyCFGPass>();
     passManager.addPass<SROAPass>();
     passManager.addPass<Mem2RegPass>();
@@ -223,22 +223,89 @@ int run(const CompilerOptions &options, std::string_view sourceView,
       passManager.addPass<GVNPass>();
       passManager.addPass<DCEPass>();
       passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<ADCEPass>();
+      passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<DCEPass>();
     }
 
-    // 前端展开和标量优化显式暴露的常量全局初始化
+    // DSE只证明内存写不可观察 随后交给标量与控制流清理收割地址生产链
+    passManager.addPass<DSEPass>();
+    passManager.addPass<DCEPass>();
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<ADCEPass>();
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<DCEPass>();
+    passManager.addPass<ADCEPass>();
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<DCEPass>();
+
+#ifndef NDEBUG
+    const auto hookLCSSAVerifier = [&passManager](std::string_view passName) {
+      passManager.options().hook(
+          passName,
+          [&passManager, passName](Module *currentModule, const PassResult &) {
+            for (Function *function = currentModule->functionHead; function;
+                 function = function->next) {
+              if (function->isExtern || function->phase != IRPhase::LIR)
+                continue;
+              const bool valid =
+                  verifyLCSSA(function, passManager.functionAnalyses());
+              if (!valid)
+                std::fprintf(stderr, "LCSSA broken after %.*s in %s\n",
+                             static_cast<i32>(passName.size()), passName.data(),
+                             function->name);
+              VERIFY(valid, "LCSSA invariant broken");
+            }
+          });
+    };
+    hookLCSSAVerifier("lcssa");
+    hookLCSSAVerifier("indvars");
+    hookLCSSAVerifier("loop-unroll");
+    hookLCSSAVerifier("lsr");
+#endif
+    passManager.addPass<LoopSimplifyPass>();
+    passManager.addPass<LCSSAPass>();
+    passManager.addPass<IndVarSimpPass>();
+    passManager.addPass<LoopUnrollPass>();
     passManager.addPass<InstCombinePass>();
     passManager.addPass<SCCPPass>();
     passManager.addPass<ReassociatePass>();
     passManager.addPass<AggressiveConstFoldPass>();
     passManager.addPass<DCEPass>();
+
+    // 标量清理可能改变入口或折掉封口Phi LSR前重新规范化
+    passManager.addPass<LoopSimplifyPass>();
+    passManager.addPass<LCSSAPass>();
+    passManager.addPass<LSRPass>();
+    passManager.addPass<LCSSATeardownPass>();
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<DCEPass>();
     passManager.addPass<SROAPass>();
     passManager.addPass<Mem2RegPass>();
 
-    passManager.addPass<InstCombinePass>();
-    passManager.addPass<SCCPPass>();
+    for (u32 i = 0; i < 3; ++i) {
+      passManager.addPass<InstCombinePass>();
+      passManager.addPass<SCCPPass>();
+      passManager.addPass<DCEPass>();
+      passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<JumpThreadingPass>();
+      passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<ADCEPass>();
+      passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<DCEPass>();
+      passManager.addPass<LICMPass>();
+      passManager.addPass<GCMPass>();
+      passManager.addPass<ReassociatePass>();
+      passManager.addPass<GVNPass>();
+      passManager.addPass<DCEPass>();
+      passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<ADCEPass>();
+      passManager.addPass<SimplifyCFGPass>();
+      passManager.addPass<DCEPass>();
+    }
+
+    passManager.addPass<DSEPass>();
     passManager.addPass<DCEPass>();
-    passManager.addPass<SimplifyCFGPass>();
-    passManager.addPass<JumpThreadingPass>();
     passManager.addPass<SimplifyCFGPass>();
     passManager.addPass<ADCEPass>();
     passManager.addPass<SimplifyCFGPass>();
@@ -250,6 +317,14 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     passManager.addPass<SimplifyCFGPass>();
     passManager.addPass<DCEPass>();
     passManager.addPass<SwitchCanonicalizePass>();
+
+    passManager.addPass<DSEPass>();
+    passManager.addPass<DCEPass>();
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<ADCEPass>();
+    passManager.addPass<SimplifyCFGPass>();
+    passManager.addPass<DCEPass>();
+
     passManager.addPass<IfConversionPass>();
     passManager.addPass<InstCombinePass>();
     passManager.addPass<SimplifyCFGPass>();
