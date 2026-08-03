@@ -1,6 +1,7 @@
 #include "Analysis.h"
 #include "LIRPass.h"
 
+#include <algorithm>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -433,12 +434,51 @@ bool GCMScheduler::placeSameBlock(Inst *inst) {
   const bool isLoad = inst->getOp() == OP_LOAD;
   const MemoryLocation location =
       isLoad ? MemoryLocation::fromMemoryInstruction(inst) : MemoryLocation{};
+  BasicBlock *block = inst->parentBlock();
+  const auto useOccursAfter = [&](const Use *use, Inst *position) {
+    BasicBlock *useLocation = useBlock(use);
+    if (!useLocation)
+      return false;
+    if (useLocation != block)
+      return dominators_.dominates(block, useLocation);
+    if (use->user->getOp() == OP_PHI)
+      return true;
+    for (Inst *cursor = position->next(); cursor; cursor = cursor->next())
+      if (cursor == use->user)
+        return true;
+    return false;
+  };
+  // 结果留在call前只占一个live-through颜色
+  // 仅当下沉会新增两个以上原本不跨call的操作数时停止
+  // 已有call后使用和重复操作数不重复计入
+  const auto raisesCallPressure = [&](Inst *call) {
+    std::vector<Inst *> newlyLive;
+    for (u32 index = 0; index < inst->getOperandCount(); ++index) {
+      Inst *operand = inst->getArg(index);
+      if (!operand || operand->isUndefValue() ||
+          operand->getOp() == OP_ICONST || operand->getOp() == OP_FCONST)
+        continue;
+      if (std::find(newlyLive.begin(), newlyLive.end(), operand) !=
+          newlyLive.end())
+        continue;
+      bool alreadyLive = false;
+      for (const Use *use = operand->uses(); use; use = use->next)
+        if (use->user != inst && useOccursAfter(use, call)) {
+          alreadyLive = true;
+          break;
+        }
+      if (!alreadyLive)
+        newlyLive.push_back(operand);
+    }
+    return newlyLive.size() > 1;
+  };
   Inst *anchor = nullptr;
   u32 steps = 0;
   for (Inst *cursor = inst->next(); cursor; cursor = cursor->next()) {
     if (++steps > kMaxSameBlockScan)
       return false;
-    if ((isLoad && mayClobber(cursor, location)) || usesValue(cursor, inst)) {
+    if ((isLoad && mayClobber(cursor, location)) || usesValue(cursor, inst) ||
+        (cursor->getOp() == OP_CALL && raisesCallPressure(cursor))) {
       anchor = cursor;
       break;
     }

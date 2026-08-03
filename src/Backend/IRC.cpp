@@ -111,8 +111,8 @@ template <typename... Args>
 //    它们作为同寄存器类的 small spill storage, 必须从普通颜色集合中拿掉
 //    避免同一物理寄存器同时承担普通 VReg 与 storage 两种身份
 // 5. 数组顺序只是最终稳定 tie-break
-//    chooseColor 会先处理 ABI 和 copy affinity, 再根据 crossesCall 与热度为
-//    caller-saved 或 callee-saved 加分; 所有分数相同时, FPR 叶函数从 fa0-fa7
+//    chooseColor 会先处理 ABI 和 copy affinity, 再计入 caller-saved 与已计入
+//    callee-saved 颜色成本; 所有分数相同时, FPR 叶函数从 fa0-fa7
 //    开始, 非叶函数从 ft 系列开始, 两张表的颜色成员完全相同
 constexpr std::array<PReg, 24> kGPRColorOrder = {
     X10, X11, X12, X13, X14, X15, X16, X17, // a0-a7
@@ -402,8 +402,6 @@ struct NodeInfo {
   u32 firstInstruction = kNoInstruction;
   // 最后一次 use 或 def 的指令编号, 用于估算线性跨度
   u32 lastInstruction = kNoInstruction;
-  // 是否在至少一个 call 两侧保持活跃
-  bool crossesCall = false;
   // 所有出现位置的最大块频率
   double hotness = 1.0;
 
@@ -1146,7 +1144,6 @@ void IRCAllocator::build() {
         const u64 clobbered = ipraCallSiteClobberMask(inst);
         forEachSetBit(live.data(), virtualCount_, [&](u32 liveNode) {
           NodeInfo &info = nodes_[liveNode];
-          info.crossesCall = true;
           // call 的隐式 PReg 写入不伪装成活跃性 definition, 而是在这里转换为
           // live-through VReg 与对应 PReg 的干涉边;
           // 使用基础颜色全集而非扣除预留后的本轮掩码, 使 ordinary, small
@@ -1454,7 +1451,6 @@ void IRCAllocator::combine(u32 root, u32 merged) {
       destination.forcedColor = source.forcedColor;
     if (destination.abiPreference >= NUM_PREGS)
       destination.abiPreference = source.abiPreference;
-    destination.crossesCall |= source.crossesCall;
     destination.useDefWeight += source.useDefWeight;
     destination.hotness = std::max(destination.hotness, source.hotness);
     destination.spillDepth =
@@ -1658,19 +1654,16 @@ PReg IRCAllocator::chooseColor(u32 node, u64 available) {
   if (hinted < NUM_PREGS)
     return hinted;
 
-  // 第三层在统一颜色表内平滑调用惯例
+  // 第三层在统一颜色表内比较函数级保存成本
   //
-  // 非叶函数中, crossesCall 且至少一个出现位置 hotness > 1 的值偏好
-  // callee-saved; 其它值偏好 caller-saved, 避免仅为少量值扩大 calleeSaveMask
-  // 和 prologue/epilogue
-  //
-  // 实际被 call 破坏的颜色已经由干涉边排除, 此处不会在 call 周围插入保存恢复
-  const bool preferCallee =
-      info.crossesCall && info.hotness > 1.0 && !function_->isLeaf;
+  // call 实际破坏的颜色已经由干涉边排除, 剩余 caller-saved 颜色无需保存;
+  // callee-saved 则会扩大函数级序言和尾声, 因而只在前者不可用时选择
   const u32 current =
       info.firstInstruction == kNoInstruction ? 0 : info.firstInstruction;
 
-  // 调用惯例匹配项为 2^20, 严格高于最大 2^10 的线性区间分离项;
+  // caller-saved 成本项为 2^20, 严格高于其它颜色质量项;
+  // 已使用 callee-saved 复用项为 2^11, 严格高于最大 2^10 的区间分离项,
+  // 从而不相交区间优先复用已由序言保存的颜色, 不扩大 calleeSaveMask;
   // lastColorUse_[reg] 记录最近按着色栈顺序染成 reg 的节点末次指令编号;
   // 着色栈顺序并非程序执行顺序, 因而 distance 只是粗略区间分离 tie-break;
   // 它不构成具体微架构 WAW 或 RAW 收益保证, 完全同分时保持颜色表顺序
@@ -1680,7 +1673,9 @@ PReg IRCAllocator::chooseColor(u32 node, u64 available) {
     for (PReg reg : order) {
       if ((available & registerBit(reg)) == 0)
         continue;
-      i64 score = isCalleeSaved(reg) == preferCallee ? i64{1} << 20 : 0;
+      i64 score = !isCalleeSaved(reg) ? i64{1} << 20 : 0;
+      if (isCalleeSaved(reg) && lastColorUse_[reg] != kNoInstruction)
+        score += i64{1} << 11;
       i64 distance = i64{1} << 10;
       if (lastColorUse_[reg] != kNoInstruction) {
         distance = current >= lastColorUse_[reg]
