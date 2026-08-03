@@ -29,6 +29,8 @@ DECLARE_FUNCTION_PASS(IfConversionPass);
 DECLARE_FUNCTION_PASS(SROAPass);
 DECLARE_FUNCTION_PASS(LoopSimplifyPass);
 DECLARE_FUNCTION_PASS(IndVarSimpPass);
+DECLARE_FUNCTION_PASS(SimpleLoopUnswitchPass);
+DECLARE_FUNCTION_PASS(InvariantRepeatReductionPass);
 DECLARE_FUNCTION_PASS(LSRPass);
 
 DECLARE_FUNCTION_PASS(LCSSAPass);
@@ -38,6 +40,10 @@ bool formLCSSA(Function *function, FunctionAnalysisManager &analyses);
 bool teardownLCSSA(Function *function);
 // 验证循环内定义仅通过退出Phi流向循环外
 bool verifyLCSSA(Function *function, FunctionAnalysisManager &analyses);
+// 验证所有自然循环具有唯一preheader,唯一latch和dedicated exit
+bool verifyLoopSimplify(Function *function, FunctionAnalysisManager &analyses);
+// CFG循环变换后恢复LoopSimplify与LCSSA
+bool repairLoopForm(Function *function, PassContext &context);
 
 class LoopUnrollPass final : public FunctionPass {
 public:
