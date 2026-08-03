@@ -71,8 +71,7 @@ bool formDedicatedExit(Function *function, Loop *loop) {
   return false;
 }
 
-bool simplifyOneLoop(Function *function,
-                     FunctionAnalysisManager &analyses) {
+bool simplifyOneLoop(Function *function, FunctionAnalysisManager &analyses) {
   const LoopInfo &loops = analyses.getResult<LoopInfoAnalysis>(function).info;
   std::vector<Loop *> worklist;
   const std::function<void(Loop *)> collectPostorder = [&](Loop *loop) {
@@ -92,6 +91,53 @@ bool simplifyOneLoop(Function *function,
 }
 
 } // namespace
+
+bool verifyLoopSimplify(Function *function, FunctionAnalysisManager &analyses) {
+  if (!function || function->isExtern || function->phase != IRPhase::LIR ||
+      !function->region)
+    return true;
+  const LoopInfo &loops = analyses.getResult<LoopInfoAnalysis>(function).info;
+  bool valid = true;
+  const std::function<void(Loop *)> verifyLoop = [&](Loop *loop) {
+    BasicBlock *preheader = loop->getPreheader();
+    valid &= preheader && preheader->endsWithTerminator() &&
+             preheader->terminator()->getOp() == OP_JMP &&
+             preheader->terminator()->getJumpTarget() == loop->header();
+    valid &= loop->latches().size() == 1;
+    for (BasicBlock *exit : loop->exitBlocks())
+      for (u32 index = 0; exit && index < exit->getPredecessorCount(); ++index)
+        valid &= loop->contains(exit->getPredecessor(index));
+    for (Loop *child : loop->children())
+      verifyLoop(child);
+  };
+  for (Loop *loop : loops.topLevelLoops())
+    verifyLoop(loop);
+  return valid;
+}
+
+bool repairLoopForm(Function *function, PassContext &context) {
+  FunctionAnalysisManager &analyses = context.functionAnalyses();
+  // 调用点刚完成CFG事务 候选阶段的Dom/Loop/SCEV均已过期
+  analyses.clear(function);
+  LoopSimplifyPass simplify;
+  const PassResult simplified = simplify.run(function, context);
+  if (simplified.changed)
+    analyses.clear(function);
+  const bool closed = formLCSSA(function, analyses);
+  if (closed) {
+    computeUses(function);
+    analyses.clear(function);
+  }
+#ifndef NDEBUG
+  for (BasicBlock *block = function->region->first; block;
+       block = block->next())
+    VERIFY(CFGEditor::hasConsistentIncomingState(block));
+  VERIFY(verifyDominance(function));
+  VERIFY(verifyLoopSimplify(function, analyses));
+  VERIFY(verifyLCSSA(function, analyses));
+#endif
+  return simplified.changed || closed;
+}
 
 std::string_view LoopSimplifyPass::name() const noexcept {
   return "loop-simplify";
