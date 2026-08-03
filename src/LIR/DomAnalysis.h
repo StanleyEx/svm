@@ -40,6 +40,8 @@ private:
   DomFrontierMap frontier_;                            // 支配边界表
 };
 
+bool verifyDominance(Function *function);
+
 class PostDominatorTree {
 public:
   bool build(Function *function);

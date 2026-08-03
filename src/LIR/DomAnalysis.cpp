@@ -126,6 +126,70 @@ bool DominatorTree::build(Function *function) {
   return true;
 }
 
+bool verifyDominance(Function *function) {
+  if (!function || function->isExtern || !function->region ||
+      function->phase != IRPhase::LIR)
+    return true;
+  BasicBlock *entry = function->region->first;
+  if (!entry)
+    return true;
+  DominatorTree tree;
+  if (!tree.build(function) || tree.getDepth(entry) < 0)
+    return false;
+  std::vector<u8> available(function->instCount, 0);
+
+  for (BasicBlock *block = entry; block; block = block->next()) {
+    if (tree.getDepth(block) < 0)
+      continue;
+    for (Inst *phi = block->firstPhi(); phi; phi = phi->next()) {
+      if (phi->id >= available.size())
+        return false;
+      available[phi->id] = 1;
+    }
+
+    const auto validUser = [&](Inst *user) {
+      if (!user || user->isErased() || user->parentBlock() != block)
+        return false;
+      for (u32 index = 0; index < user->getOperandCount(); ++index) {
+        Inst *definition = user->getArg(index);
+        if (!definition || definition->isErased())
+          return false;
+        BasicBlock *definitionBlock = definition->parentBlock();
+        if (!definitionBlock) {
+          if (!definition->isUndefValue() && !definition->isPrecoloredDef() &&
+              !isConstant(definition->getOp()))
+            return false;
+          continue;
+        }
+        if (tree.getDepth(definitionBlock) < 0)
+          return false;
+        if (user->getOp() == OP_PHI) {
+          BasicBlock *incoming = user->getIncomingBlock(index);
+          if (!incoming || tree.getDepth(incoming) < 0 ||
+              !tree.dominates(definitionBlock, incoming))
+            return false;
+          continue;
+        }
+        if (!tree.dominates(definitionBlock, block) ||
+            (definitionBlock == block && (definition->id >= available.size() ||
+                                          !available[definition->id])))
+          return false;
+      }
+      return true;
+    };
+
+    for (Inst *phi = block->firstPhi(); phi; phi = phi->next())
+      if (!validUser(phi))
+        return false;
+    for (Inst *inst = block->firstInst(); inst; inst = inst->next()) {
+      if (!validUser(inst) || inst->id >= available.size())
+        return false;
+      available[inst->id] = 1;
+    }
+  }
+  return true;
+}
+
 bool DominatorTree::dominates(const BasicBlock *dominator,
                               const BasicBlock *block) const noexcept {
   if (!dominator || !block)
