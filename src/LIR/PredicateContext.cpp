@@ -473,9 +473,18 @@ PredicateContextBuilder::buildBlockContext(BasicBlock *contextBlock) {
         BasicBlock *trueBlock = terminator->getBr().trueBB;
         BasicBlock *falseBlock = terminator->getBr().falseBB;
         const auto edgeDominates = [&](BasicBlock *successor) noexcept {
-          return successor && successor->getPredecessorCount() == 1 &&
-                 successor->getPredecessor(0) == idom &&
-                 dominatorTree_->dominates(successor, contextBlock);
+          if (!successor || !dominatorTree_->dominates(successor, contextBlock))
+            return false;
+          bool hasController = false;
+          for (u32 index = 0; index < successor->getPredecessorCount();
+               ++index) {
+            BasicBlock *predecessor = successor->getPredecessor(index);
+            if (predecessor == idom)
+              hasController = true;
+            else if (!dominatorTree_->dominates(successor, predecessor))
+              return false;
+          }
+          return hasController;
         };
         const bool trueDominates = edgeDominates(trueBlock);
         const bool falseDominates = edgeDominates(falseBlock);

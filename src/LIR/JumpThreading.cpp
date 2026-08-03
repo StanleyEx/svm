@@ -252,11 +252,44 @@ bool buildRepairPlan(const DominatorTree &dominators, BasicBlock *predecessor,
   return true;
 }
 
+BasicBlock *evaluateCondition(const SCEV &scev, BasicBlock *block,
+                              const PredicateContext &facts) {
+  Inst *branch = block ? block->terminator() : nullptr;
+  if (!branch || branch->getOp() != OP_BR ||
+      branch->getBr().trueBB == branch->getBr().falseBB ||
+      !isIntCompare(branch->getArg(0)->getOp()))
+    return nullptr;
+  PredicateQuery query;
+  query.contextBlock = block;
+  query.predicateContext = &facts;
+  const KnownBool result = scev.evaluatePredicate(branch->getArg(0), query);
+  return result == KnownBool::AlwaysTrue    ? branch->getBr().trueBB
+         : result == KnownBool::AlwaysFalse ? branch->getBr().falseBB
+                                            : nullptr;
+}
+
 bool threadOrdinaryBlock(Function *function, const DominatorTree &dominators,
                          const SCEV *scev, BasicBlock *block,
                          RepairState &repair, BlockWorklist &worklist) {
   Inst *branch = block ? block->terminator() : nullptr;
-  if (!branch || branch->getOp() != OP_BR || isLoopHeader(block, dominators) ||
+  if (!branch || branch->getOp() != OP_BR)
+    return false;
+
+  // 多条路径汇合后仍可由支配边事实证明整个块只会选择同一后继
+  // 直接折叠块终结符可保留块内Phi 避免逐前驱线程化引入临时内存
+  if (scev && block->getPredecessorCount() > 1) {
+    PredicateContextBuilder contexts(&dominators);
+    BasicBlock *destination =
+        evaluateCondition(*scev, block, contexts.buildBlockContext(block));
+    if (destination &&
+        CFGEditor::foldTerminatorToJump(function, block, destination)) {
+      worklist.pushNeighborhood(block);
+      worklist.pushNeighborhood(destination);
+      return true;
+    }
+  }
+
+  if (isLoopHeader(block, dominators) ||
       !isThreadableConditionBlock(block, branch, false))
     return false;
 
@@ -286,7 +319,6 @@ bool threadOrdinaryBlock(Function *function, const DominatorTree &dominators,
             : CFGEditor::redirectEdge(function, predecessor, block, destination,
                                       plan.destinationValues);
     VERIFY(redirected);
-    VERIFY(computePreds(function));
     worklist.pushNeighborhood(predecessor);
     worklist.pushNeighborhood(block);
     worklist.pushNeighborhood(destination);
@@ -332,22 +364,6 @@ bool headerAlwaysReaches(const SCEV &scev, BasicBlock *header,
           result == KnownBool::AlwaysTrue) ||
          (terminator->getBr().falseBB == conditionBlock &&
           result == KnownBool::AlwaysFalse);
-}
-
-BasicBlock *evaluateCondition(const SCEV &scev, BasicBlock *block,
-                              const PredicateContext &facts) {
-  Inst *branch = block ? block->terminator() : nullptr;
-  if (!branch || branch->getOp() != OP_BR ||
-      branch->getBr().trueBB == branch->getBr().falseBB ||
-      !isIntCompare(branch->getArg(0)->getOp()))
-    return nullptr;
-  PredicateQuery query;
-  query.contextBlock = block;
-  query.predicateContext = &facts;
-  const KnownBool result = scev.evaluatePredicate(branch->getArg(0), query);
-  return result == KnownBool::AlwaysTrue    ? branch->getBr().trueBB
-         : result == KnownBool::AlwaysFalse ? branch->getBr().falseBB
-                                            : nullptr;
 }
 
 bool cloneTransition(Function *function, const DominatorTree &dominators,
@@ -416,7 +432,6 @@ bool cloneTransition(Function *function, const DominatorTree &dominators,
   VERIFY(CFGEditor::redirectEdge(function, predecessor, header, clone));
   builder.replaceWithJump(temporaryTerminator, header);
   VERIFY(CFGEditor::addPhiEdgeValues(function, header, clone, newHeaderValues));
-  VERIFY(computePreds(function));
   return true;
 }
 
@@ -504,7 +519,8 @@ bool runJumpThreading(Function *function, PassContext &context) {
   auto refresh = [&](bool needSCEV) {
     if (!dirty)
       return;
-    VERIFY(computePreds(function));
+    if (!dominators)
+      VERIFY(computePreds(function));
     analyses.clear(function);
     dominators = &context.get<DomAnalysis>(function).tree;
     scev = needSCEV ? &context.get<SCEVAnalysis>(function).info : nullptr;

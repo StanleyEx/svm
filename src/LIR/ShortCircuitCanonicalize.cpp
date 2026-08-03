@@ -164,7 +164,6 @@ bool foldOneShortCircuit(Function *function, const DominatorTree &dom) {
         VERIFY(CFGEditor::addPhiEdgeValues(function, nonCommon, head,
                                            movedValues));
       VERIFY(cleanupDeadBlocks(function));
-      VERIFY(computePreds(function));
       return true;
     }
   }
@@ -194,6 +193,7 @@ PassResult ShortCircuitCanonicalizePass::run(Function *function,
   }
   if (!changed)
     return PassResult::noChange();
+  VERIFY(computePreds(function));
 
   PreservedAnalyses preserved;
   preserved.preserveSSAForm();

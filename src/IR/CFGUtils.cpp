@@ -300,7 +300,7 @@ bool computePreds(Function *function) {
   }
 
   for (BasicBlock *block : blocks) {
-    assert(CFGEditor::hasConsistentIncomingState(block));
+    assert(hasAlignedIncomingMetadata(block));
     UNUSED(block);
   }
   return true;
@@ -1004,8 +1004,7 @@ bool cleanupDeadBlocks(Function *function) {
   for (BasicBlock *block : dead)
     CFGEditor::eraseBlock(function, block);
   for (BasicBlock *block : blocks) {
-    assert(!reachable.count(block) ||
-           CFGEditor::hasConsistentIncomingState(block));
+    assert(!reachable.count(block) || hasAlignedIncomingMetadata(block));
     UNUSED(block);
   }
   return true;
