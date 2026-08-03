@@ -115,8 +115,12 @@ public:
   // 展平Region指令
   void flattenRegionIntoBlock(Region *source, BasicBlock *destination,
                               bool keepTrailingTerminator);
-  // 补退出Phi
-  void addTranslatedExitPhiIncomings(
+  // 只读检查克隆块新增的退出边能否完整补齐Phi
+  static bool canAddTranslatedExitPhiIncomings(
+      Function *function, const std::vector<BasicBlock *> &blocks,
+      const std::function<bool(BasicBlock *, BasicBlock *)> &filter = {});
+  // 补退出Phi 失败时不修改任何Phi或predecessor
+  bool addTranslatedExitPhiIncomings(
       Function *function, const std::vector<ClonedBlockPair> &blocks,
       const std::function<bool(BasicBlock *, BasicBlock *)> &filter = {});
 

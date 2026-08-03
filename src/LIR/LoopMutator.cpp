@@ -47,10 +47,11 @@ cloneLoopIteration(Function *function, const CountedLoopShape &shape,
   std::vector<ClonedBlockPair> blocks = copier->copyBlocks(loopBlocks, config);
   VERIFY(blocks.size() == loopBlocks.size());
   // 每代立即镜像外部incoming 使后续CFG改写始终面对完整Phi元数据
-  copier->addTranslatedExitPhiIncomings(function, blocks,
-                                        [&](BasicBlock *, BasicBlock *exit) {
-                                          return !shape.loop->contains(exit);
-                                        });
+  const bool addedExitPhis = copier->addTranslatedExitPhiIncomings(
+      function, blocks, [&](BasicBlock *, BasicBlock *exit) {
+        return !shape.loop->contains(exit);
+      });
+  VERIFY(addedExitPhis);
   std::unordered_set<BasicBlock *> clonedBlocks;
   for (const ClonedBlockPair &pair : blocks)
     clonedBlocks.insert(pair.clone);

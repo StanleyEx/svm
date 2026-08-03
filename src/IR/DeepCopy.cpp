@@ -1,6 +1,7 @@
 #include "DeepCopy.h"
 
 #include <cassert>
+#include <limits>
 #include <unordered_set>
 #include <utility>
 
@@ -752,33 +753,112 @@ void DeepCopy::flattenRegionIntoBlock(Region *source, BasicBlock *destination,
   }
 }
 
-void DeepCopy::addTranslatedExitPhiIncomings(
+bool DeepCopy::canAddTranslatedExitPhiIncomings(
+    Function *function, const std::vector<BasicBlock *> &blocks,
+    const std::function<bool(BasicBlock *, BasicBlock *)> &filter) {
+  if (!function || !function->region)
+    return false;
+  std::unordered_set<BasicBlock *> sourceSet(blocks.begin(), blocks.end());
+  if (sourceSet.size() != blocks.size())
+    return false;
+
+  std::unordered_map<BasicBlock *, u32> addedByExit;
+  for (BasicBlock *sourcePred : blocks) {
+    if (!sourcePred || sourcePred->parentRegion != function->region ||
+        !CFGEditor::hasConsistentIncomingState(sourcePred))
+      return false;
+    bool valid = true;
+    forEachSuccessor(sourcePred, [&](BasicBlock *exit) {
+      if (sourceSet.count(exit) || (filter && !filter(sourcePred, exit)))
+        return;
+      if (!exit || exit->parentRegion != function->region ||
+          !CFGEditor::hasConsistentIncomingState(exit)) {
+        valid = false;
+        return;
+      }
+      forEachPhi(exit, [&](Inst *phi) {
+        valid &= CFGEditor::getPhiIncomingValue(phi, sourcePred) != nullptr;
+      });
+      ++addedByExit[exit];
+    });
+    if (!valid)
+      return false;
+  }
+  for (const auto &[exit, count] : addedByExit)
+    if (exit->firstPhi() &&
+        static_cast<u64>(exit->getPredecessorCount()) + count >
+            std::numeric_limits<u16>::max())
+      return false;
+  return true;
+}
+
+bool DeepCopy::addTranslatedExitPhiIncomings(
     Function *function, const std::vector<ClonedBlockPair> &blocks,
     const std::function<bool(BasicBlock *, BasicBlock *)> &filter) {
-  assert(function);
+  if (!function)
+    return false;
   std::unordered_set<BasicBlock *> sourceSet;
+  std::unordered_set<BasicBlock *> cloneSet;
   for (const ClonedBlockPair &pair : blocks)
-    sourceSet.insert(pair.source);
+    if (!pair.source || !pair.clone || !sourceSet.insert(pair.source).second ||
+        !cloneSet.insert(pair.clone).second ||
+        translateBlock(pair.source) != pair.clone)
+      return false;
+  struct PlannedEdge {
+    BasicBlock *exit = nullptr;
+    BasicBlock *clonePred = nullptr;
+    std::vector<CFGEditor::PhiEdgeValue> values;
+  };
+  std::vector<PlannedEdge> plan;
+  std::unordered_map<BasicBlock *, std::unordered_set<BasicBlock *>>
+      plannedPreds;
   // 对每条从克隆集合离开的边
   // 把源predecessor对应的Phi值翻译后安装到克隆predecessor
   // CFGEditor负责保持边和Phi incoming一致
   for (const ClonedBlockPair &pair : blocks) {
     BasicBlock *sourcePred = pair.source;
+    bool valid = true;
     forEachSuccessor(sourcePred, [&](BasicBlock *exit) {
       if (sourceSet.count(exit) || (filter && !filter(sourcePred, exit)))
         return;
-      std::vector<CFGEditor::PhiEdgeValue> values;
+      PlannedEdge edge;
+      edge.exit = exit;
+      edge.clonePred = pair.clone;
+      if (!exit || exit->parentRegion != function->region ||
+          !plannedPreds[exit].insert(pair.clone).second) {
+        valid = false;
+        return;
+      }
       forEachPhi(exit, [&](Inst *phi) {
         Inst *value = CFGEditor::getPhiIncomingValue(phi, sourcePred);
-        if (value)
-          values.push_back({phi, translate(value)});
+        Inst *translated = value ? translate(value) : nullptr;
+        if (!translated)
+          valid = false;
+        else
+          edge.values.push_back({phi, translated});
       });
-      const bool added = CFGEditor::addPhiEdgeValues(
-          function, exit, translateBlock(sourcePred), values);
-      if (!added)
-        note(exit->firstPhi(), "DeepCopy无法为克隆退出边补齐Phi incoming.");
+      plan.push_back(std::move(edge));
     });
+    if (!valid)
+      return false;
   }
+  for (const auto &[exit, predecessors] : plannedPreds)
+    if (exit->firstPhi() &&
+        static_cast<u64>(exit->getPredecessorCount()) + predecessors.size() >
+            std::numeric_limits<u16>::max())
+      return false;
+  for (const PlannedEdge &edge : plan) {
+    if (!edge.exit || !edge.clonePred ||
+        !CFGEditor::hasSemanticEdge(edge.clonePred, edge.exit))
+      return false;
+    for (u32 index = 0; index < edge.exit->getPredecessorCount(); ++index)
+      if (edge.exit->getPredecessor(index) == edge.clonePred)
+        return false;
+  }
+  for (const PlannedEdge &edge : plan)
+    VERIFY(CFGEditor::addPhiEdgeValues(function, edge.exit, edge.clonePred,
+                                       edge.values));
+  return true;
 }
 
 } // namespace ir
