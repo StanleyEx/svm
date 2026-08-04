@@ -2,14 +2,13 @@
 #define LIR_ANALYSIS_H
 
 #include "Alias.h"
+#include "DependenceAnalysis.h"
 #include "DomAnalysis.h"
 #include "GlobalSummary.h"
 #include "LoopInfo.h"
 #include "LoopShape.h"
 #include "PassManager.h"
 #include "SCEV.h"
-
-#include <cstdlib>
 
 namespace svm::ir {
 
@@ -57,17 +56,6 @@ struct LoopInfoAnalysis {
   }
 };
 
-struct LoopShapeAnalysis {
-  LoopShapeInfo info;
-
-  static const AnalysisKey *ID() noexcept {
-    static AnalysisKey key;
-    return &key;
-  }
-  void run(Function *function, FunctionAnalysisManager &manager);
-  bool invalidate(Function *function, const PreservedAnalyses &preserved) const;
-};
-
 struct SCEVAnalysis {
   SCEV info;
   static const AnalysisKey *ID() noexcept {
@@ -84,6 +72,32 @@ struct SCEVAnalysis {
          preserved.preserves<LoopInfoAnalysis>());
     return !preserved.preserves(ID()) || !preserved.preservesSSAForm() ||
            !dependenciesPreserved;
+  }
+};
+
+struct LoopShapeAnalysis {
+  LoopShapeInfo info;
+
+  static const AnalysisKey *ID() noexcept {
+    static AnalysisKey key;
+    return &key;
+  }
+  void run(Function *function, FunctionAnalysisManager &manager) {
+    VERIFY(function && function->phase == IRPhase::LIR);
+    const SCEV &scev = manager.getResult<SCEVAnalysis>(function).info;
+    const LoopInfo &loopInfo =
+        manager.getResult<LoopInfoAnalysis>(function).info;
+    info.build(&scev, &loopInfo);
+  }
+  bool invalidate(Function *function,
+                  const PreservedAnalyses &preserved) const {
+    UNUSED(function);
+    if (!preserved.preserves(ID()) || !preserved.preservesSSAForm() ||
+        !preserved.preserves<SCEVAnalysis>())
+      return true;
+    return !(preserved.preservesCFGAnalyses() ||
+             (preserved.preserves<DomAnalysis>() &&
+              preserved.preserves<LoopInfoAnalysis>()));
   }
 };
 
@@ -113,6 +127,35 @@ struct AliasAnalysis {
          preserved.preserves<LoopInfoAnalysis>());
     return !preserved.preserves<SCEVAnalysis>() ||
            !preserved.preservesSSAForm() || !scalarDependenciesPreserved;
+  }
+};
+
+struct DependenceAnalysis {
+  DependenceInfo info;
+
+  static const AnalysisKey *ID() noexcept {
+    static AnalysisKey key;
+    return &key;
+  }
+  void run(Function *function, FunctionAnalysisManager &manager) {
+    VERIFY(function && function->phase == IRPhase::LIR);
+    const SCEV &scev = manager.getResult<SCEVAnalysis>(function).info;
+    const LoopInfo &loops = manager.getResult<LoopInfoAnalysis>(function).info;
+    const AliasInfo &alias = manager.getResult<AliasAnalysis>(function).info;
+    const DominatorTree &dominators =
+        manager.getResult<DomAnalysis>(function).tree;
+    info.build(function, &scev, &loops, &alias, &dominators);
+  }
+  bool invalidate(Function *function,
+                  const PreservedAnalyses &preserved) const {
+    UNUSED(function);
+    if (!preserved.preserves(ID()) || !preserved.preservesSSAForm() ||
+        !preserved.preserves<SCEVAnalysis>() ||
+        !preserved.preserves<AliasAnalysis>())
+      return true;
+    return !(preserved.preservesCFGAnalyses() ||
+             (preserved.preserves<DomAnalysis>() &&
+              preserved.preserves<LoopInfoAnalysis>()));
   }
 };
 

@@ -14,6 +14,16 @@ namespace {
 constexpr i64 kI32Min = static_cast<i64>(std::numeric_limits<i32>::min());
 constexpr i64 kI32Max = static_cast<i64>(std::numeric_limits<i32>::max());
 
+IRType arithmeticType(IRType left, IRType right) noexcept {
+  if (isPtr(left) || isPtr(right))
+    return TY_PTR;
+  if (left == TY_I64 || right == TY_I64)
+    return TY_I64;
+  if (left == TY_I32 || right == TY_I32)
+    return TY_I32;
+  return left;
+}
+
 BasicBlock *uniqueLoopEntryPredecessor(const Loop *loop) noexcept {
   if (!loop || !loop->header())
     return nullptr;
@@ -242,24 +252,40 @@ void SCEV::proveAndSetAddRecNoWrap(SCEVExpr *expr) const noexcept {
 }
 
 bool SCEV::proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step,
-                                   const Loop *loop) const noexcept {
+                                   const Loop *loop, const MathQuery &query,
+                                   MathBounds *range) const noexcept {
   if (!base || !step || !loop || !step->isConstant())
     return false;
-  const auto bounds = getI32Range(base).signedBounds();
-  if (!bounds || getI32Range(base).isFullSet())
+  RangeQuery rangeQuery;
+  rangeQuery.contextBlock = query.contextBlock;
+  rangeQuery.predicateContext = query.predicateContext;
+  rangeQuery.maxDepth = query.maxDepth;
+  const I32Range baseRange = getI32Range(base, rangeQuery);
+  const auto bounds = baseRange.signedBounds();
+  if (!bounds || baseRange.isFullSet())
     return false;
   const i64 stepValue = step->cst.v;
+  const auto finish = [&](i64 minimum, i64 maximum) {
+    if (!fitsI32(minimum, maximum))
+      return false;
+    if (range)
+      *range = MathBounds::of(
+          minimum, maximum,
+          NoWrapInfo{NoWrapKind::I32Signed, NoWrapSource::LoopBoundProof});
+    return true;
+  };
 
-  // 动态受守卫形式必须先证明无回绕, 否则 BTC 查询会缓存递归产生的未知值
-  if (stepValue > 0 && bounds->min >= 0 && loop->latches().size() == 1) {
+  // 动态严格边界可直接证明递推无回绕, 避免BTC与AddRec证明相互递归
+  if (stepValue != 0 && stepValue != kI32Min && loop->latches().size() == 1) {
     BasicBlock *latch = loop->latches().front();
     auto latchPredicate =
         analyzeLoopPredicate(this, loop, latch ? latch->terminator() : nullptr,
                              nullptr, loop->header(), nullptr);
     SCEVExpr *tested = latchPredicate ? latchPredicate->testedSCEV : nullptr;
-    if (latchPredicate && latchPredicate->canonicalPredicate == OP_LT &&
-        tested && tested->kind == SCEVExpr::K_ADDREC &&
-        tested->addRec.loop == loop &&
+    const OpCode expectedPredicate = stepValue > 0 ? OP_LT : OP_GT;
+    if (latchPredicate &&
+        latchPredicate->canonicalPredicate == expectedPredicate && tested &&
+        tested->kind == SCEVExpr::K_ADDREC && tested->addRec.loop == loop &&
         tested->addRec.step->structurallyEquals(step) &&
         tested->addRec.base->structurallyEquals(getAddExpr(base, step))) {
       BasicBlock *entry = uniqueLoopEntryPredecessor(loop);
@@ -269,14 +295,37 @@ bool SCEV::proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step,
           this, loop, guard ? guard->terminator() : nullptr, base,
           continueBlock, latchPredicate->exitTarget);
       const auto stopBounds =
-          getI32Range(latchPredicate->boundSCEV).signedBounds();
-      if (guardPredicate && guardPredicate->canonicalPredicate == OP_LT &&
+          getI32Range(latchPredicate->boundSCEV, rangeQuery).signedBounds();
+      const bool guardedEntry =
+          guardPredicate &&
+          guardPredicate->canonicalPredicate == expectedPredicate &&
           guardPredicate->boundSCEV->structurallyEquals(
-              latchPredicate->boundSCEV) &&
-          stopBounds && stepValue <= kI32Max &&
-          stopBounds->max <= kI32Max - (stepValue - 1)) {
-        setNoWrap(tested);
-        return true;
+              latchPredicate->boundSCEV);
+      const bool rangeEntry =
+          stopBounds && (stepValue > 0 ? bounds->max < stopBounds->min
+                                       : bounds->min > stopBounds->max);
+      const i64 magnitude = stepValue > 0 ? stepValue : -stepValue;
+      const i64 adjustment = magnitude - 1;
+      const bool safeEndpoint =
+          stopBounds &&
+          (stepValue > 0 ? stopBounds->max <= kI32Max - adjustment
+                         : stopBounds->min >= kI32Min + adjustment);
+      if ((guardedEntry || rangeEntry) && safeEndpoint) {
+        if (guardedEntry || (!query.contextBlock && !query.predicateContext))
+          setNoWrap(tested);
+        i64 minimum = bounds->min;
+        i64 maximum = bounds->max;
+        i64 endpoint = 0;
+        if (stepValue > 0) {
+          if (!checkedSub(stopBounds->max, 1, endpoint))
+            return false;
+          maximum = std::max(maximum, endpoint);
+        } else {
+          if (!checkedAdd(stopBounds->min, 1, endpoint))
+            return false;
+          minimum = std::min(minimum, endpoint);
+        }
+        return finish(minimum, maximum);
       }
     }
   }
@@ -293,8 +342,8 @@ bool SCEV::proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step,
   if (!checkedAdd(bounds->min, delta, low) ||
       !checkedAdd(bounds->max, delta, high))
     return false;
-  return std::min(static_cast<i64>(bounds->min), low) >= kI32Min &&
-         std::max(static_cast<i64>(bounds->max), high) <= kI32Max;
+  return finish(std::min(static_cast<i64>(bounds->min), low),
+                std::max(static_cast<i64>(bounds->max), high));
 }
 
 SCEVExpr *SCEV::getConstant(i64 value, IRType type) const {
@@ -321,10 +370,12 @@ SCEVExpr *SCEV::getAddRecExpr(SCEVExpr *base, SCEVExpr *step,
 }
 
 SCEVExpr *SCEV::buildAddCanonical(SCEVExpr *left, SCEVExpr *right) const {
+  const IRType type = arithmeticType(left->ty, right->ty);
   std::vector<SCEVExpr *> flattened;
   flattened.reserve(8);
   const auto flatten = [&](SCEVExpr *expr, const auto &self) -> void {
-    if (expr->kind != SCEVExpr::K_ADD) {
+    // i32 index算术必须在符号扩展到pointer-width之前完成
+    if (expr->kind != SCEVExpr::K_ADD || (isPtr(type) && expr->ty != TY_PTR)) {
       flattened.push_back(expr);
       return;
     }
@@ -334,7 +385,6 @@ SCEVExpr *SCEV::buildAddCanonical(SCEVExpr *left, SCEVExpr *right) const {
   flatten(left, flatten);
   flatten(right, flatten);
 
-  const IRType type = isPtr(left->ty) ? left->ty : right->ty;
   i64 constant = 0;
   std::vector<std::pair<i64, SCEVExpr *>> terms;
   terms.reserve(flattened.size());
@@ -384,10 +434,13 @@ SCEVExpr *SCEV::buildAddCanonical(SCEVExpr *left, SCEVExpr *right) const {
     if (coefficient == 1)
       operands.push_back(atom);
     else
-      operands.push_back(getMulExpr(atom, getConstant(coefficient, atom->ty)));
+      operands.push_back(getMulExpr(
+          atom,
+          getConstant(coefficient,
+                      type == TY_I64 || isPtr(type) ? TY_I64 : atom->ty)));
   }
   if (constant != 0)
-    operands.push_back(getConstant(constant, isPtr(type) ? TY_I32 : type));
+    operands.push_back(getConstant(constant, isPtr(type) ? TY_I64 : type));
   if (operands.empty())
     return getConstant(0, type);
   if (operands.size() == 1)
@@ -403,7 +456,7 @@ SCEVExpr *SCEV::getAddExpr(SCEVExpr *left, SCEVExpr *right) const {
   if (left->isConstant() && right->isConstant()) {
     i64 value = 0;
     if (checkedAdd(left->cst.v, right->cst.v, value))
-      return getConstant(value, isPtr(left->ty) ? left->ty : right->ty);
+      return getConstant(value, arithmeticType(left->ty, right->ty));
   }
   if (left->isZero())
     return right;
@@ -440,7 +493,7 @@ SCEVExpr *SCEV::getAddExpr(SCEVExpr *left, SCEVExpr *right) const {
 
 SCEVExpr *SCEV::getMulExpr(SCEVExpr *left, SCEVExpr *right) const {
   VERIFY(left && right);
-  const IRType type = left->ty;
+  const IRType type = arithmeticType(left->ty, right->ty);
   std::vector<SCEVExpr *> factors;
   factors.reserve(4);
   i64 constant = 1;
@@ -634,7 +687,7 @@ SCEVExpr *SCEV::createSCEV(Inst *value) const {
       return getAddExpr(base, offset);
     return getAddExpr(
         base,
-        getMulExpr(offset, getConstant(static_cast<i64>(stride), TY_I32)));
+        getMulExpr(offset, getConstant(static_cast<i64>(stride), TY_I64)));
   }
   case OP_ARRAYIDX: {
     SCEVExpr *result = getSCEV(value->getArg(0));
@@ -645,7 +698,7 @@ SCEVExpr *SCEV::createSCEV(Inst *value) const {
           rawStride > static_cast<u64>(std::numeric_limits<i64>::max()))
         return getUnknown(value);
       SCEVExpr *subscript = getSCEV(value->getArg(index + 1));
-      SCEVExpr *stride = getConstant(static_cast<i64>(rawStride), TY_I32);
+      SCEVExpr *stride = getConstant(static_cast<i64>(rawStride), TY_I64);
       result = getAddExpr(result, getMulExpr(subscript, stride));
     }
     return result;

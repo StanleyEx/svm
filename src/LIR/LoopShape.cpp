@@ -1,5 +1,4 @@
 #include "LoopShape.h"
-#include "Analysis.h"
 #include "Utils.h"
 
 #include <unordered_set>
@@ -156,7 +155,7 @@ bool LoopShapeInfo::buildBaseShape(Loop *loop, CountedLoopShape &shape,
     return fail("循环或header无效");
   if (loop->latches().size() != 1)
     return fail("循环存在多个latch");
-  if (loop->exitingBlocks().size() == 0)
+  if (loop->exitingBlocks().size() != 1)
     return fail("循环存在多个exiting");
 
   shape.loop = loop;
@@ -399,25 +398,6 @@ LoopShapeInfo::getHeaderPhiTransfer(Inst *phi) const {
   if (!info.hasNonzeroSelfDelta)
     return memo(std::nullopt);
   return memo(std::move(info));
-}
-
-void LoopShapeAnalysis::run(Function *function,
-                            FunctionAnalysisManager &manager) {
-  VERIFY(function && function->phase == IRPhase::LIR);
-  const SCEV &scev = manager.getResult<SCEVAnalysis>(function).info;
-  const LoopInfo &loopInfo = manager.getResult<LoopInfoAnalysis>(function).info;
-  info.build(&scev, &loopInfo);
-}
-
-bool LoopShapeAnalysis::invalidate(Function *function,
-                                   const PreservedAnalyses &preserved) const {
-  UNUSED(function);
-  if (!preserved.preserves(ID()) || !preserved.preservesSSAForm() ||
-      !preserved.preserves<SCEVAnalysis>())
-    return true;
-  return !(preserved.preservesCFGAnalyses() ||
-           (preserved.preserves<DomAnalysis>() &&
-            preserved.preserves<LoopInfoAnalysis>()));
 }
 
 } // namespace svm::ir

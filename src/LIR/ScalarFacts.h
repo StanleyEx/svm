@@ -181,15 +181,16 @@ Congruence meetCongruence(const Congruence &left,
                           const Congruence &right) noexcept;
 
 //  No-Wrap 证明 (NoWrapKind / NoWrapSource / NoWrapInfo)
-/// 无回绕是证明元数据, 不是值域模式. 它回答为何 i32 运行值可等同数学
+/// 无回绕是证明元数据, 不是值域模式. 它回答为何机器运行值可等同数学
 /// 整数值, 只服务数学域消费者, 例如别名偏移排序和 IndVarSimp 出口物化.
 /// SysY i32 默认回绕语义不是有符号溢出未定义行为, 因此绝不凭 LanguageRule
 /// 乐观假设.
 enum class NoWrapKind : u8 {
-  None,        // 无证明
-  I32Signed,   // 有符号不回绕
-  I32Unsigned, // 无符号不回绕
-  Both,        // 两种解释均不回绕
+  None,          // 无证明
+  I32Signed,     // 有符号不回绕
+  I32Unsigned,   // 无符号不回绕
+  Both,          // 两种解释均不回绕
+  PointerSigned, // pointer-width有符号字节偏移不回绕
 };
 
 enum class NoWrapSource : u8 {

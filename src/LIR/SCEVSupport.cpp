@@ -38,6 +38,31 @@ bool instructionVisibleAt(Inst *value, const Function *function,
   return false;
 }
 
+struct ScaledPointerOffset {
+  SCEVExpr *index = nullptr; // 需要符号扩展的i32索引
+  i32 stride = 0;            // pointer-width字节倍率
+};
+
+ScaledPointerOffset matchScaledPointerOffset(SCEVExpr *expr) noexcept {
+  if (!expr || expr->ty != TY_I64 || expr->kind != SCEVExpr::K_MUL ||
+      expr->nary.ops.size() != 2)
+    return {};
+  SCEVExpr *constant = nullptr;
+  SCEVExpr *index = nullptr;
+  for (SCEVExpr *operand : expr->nary.ops) {
+    if (!operand)
+      return {};
+    if (operand->isConstant())
+      constant = constant ? nullptr : operand;
+    else
+      index = index ? nullptr : operand;
+  }
+  if (!constant || !index || index->ty != TY_I32 || constant->cst.v <= 0 ||
+      !fitsI32(constant->cst.v))
+    return {};
+  return {index, static_cast<i32>(constant->cst.v)};
+}
+
 } // namespace
 
 SCEV::ExpansionReuse SCEV::findExpansionReuse(const SCEV *scev,
@@ -132,32 +157,62 @@ bool SCEV::canExpandAt(const SCEV *scev, const Function *function,
   };
   switch (expr->kind) {
   case SCEVExpr::K_CONSTANT:
-    return isInteger(expr->ty);
+    return isInteger(expr->ty) && (expr->ty != TY_I64 || fitsI32(expr->cst.v));
   case SCEVExpr::K_UNKNOWN:
     return expr->unk.val && expr->unk.val->getType() == expr->ty &&
            instructionVisibleAt(expr->unk.val, function, insertBlock,
                                 insertBefore,
                                 scev ? scev->dominatorTree_ : nullptr);
-  case SCEVExpr::K_ADD:
-  case SCEVExpr::K_MUL: {
+  case SCEVExpr::K_ADD: {
     if (expr->nary.ops.empty())
       return false;
     u32 pointerOperands = 0;
     for (SCEVExpr *operand : expr->nary.ops) {
-      if (!operand ||
-          !canExpandAt(scev, function, operand, insertBlock, insertBefore))
+      if (!operand)
         return false;
       if (operand->kind != SCEVExpr::K_CONSTANT && operand->ty == TY_PTR)
         ++pointerOperands;
+      if (expr->ty == TY_PTR && operand->ty == TY_I64) {
+        const ScaledPointerOffset scaled = matchScaledPointerOffset(operand);
+        if (scaled.index) {
+          if (!canExpandAt(scev, function, scaled.index, insertBlock,
+                           insertBefore))
+            return false;
+          continue;
+        }
+        if (operand->kind != SCEVExpr::K_CONSTANT &&
+            operand->kind != SCEVExpr::K_MUL)
+          return false;
+      }
+      if (!canExpandAt(scev, function, operand, insertBlock, insertBefore))
+        return false;
     }
-    if (expr->kind == SCEVExpr::K_MUL)
-      return isInteger(expr->ty) && pointerOperands == 0;
+    if (expr->ty == TY_I64)
+      return false;
     return expr->ty == TY_PTR ? pointerOperands == 1
                               : isInteger(expr->ty) && pointerOperands == 0;
   }
+  case SCEVExpr::K_MUL: {
+    if (!isInteger(expr->ty) || expr->nary.ops.empty())
+      return false;
+    if (expr->ty == TY_I64) {
+      if (!scev)
+        return false;
+      MathQuery query;
+      query.contextBlock = insertBlock;
+      const MathBounds bounds = scev->proveMathBoundsNoWrap(expr, query);
+      if (!bounds.valid || !fitsI32(bounds.min, bounds.max))
+        return false;
+    }
+    for (SCEVExpr *operand : expr->nary.ops)
+      if (!operand || operand->ty == TY_PTR ||
+          !canExpandAt(scev, function, operand, insertBlock, insertBefore))
+        return false;
+    return true;
+  }
   case SCEVExpr::K_SDIV:
   case SCEVExpr::K_SREM:
-    return isInteger(expr->ty) && expr->bin.lhs && expr->bin.rhs &&
+    return expr->ty == TY_I32 && expr->bin.lhs && expr->bin.rhs &&
            expr->bin.lhs->ty != TY_PTR && expr->bin.rhs->ty != TY_PTR &&
            canExpandAt(scev, function, expr->bin.lhs, insertBlock,
                        insertBefore) &&
@@ -247,7 +302,31 @@ Inst *SCEVExpander::expand(SCEVExpr *expr, Inst *insertBefore) {
     if ((expr->ty == TY_PTR && pointerOperands != 1) ||
         (expr->ty != TY_PTR && pointerOperands != 0))
       return nullptr;
-    // 多元加法按操作数顺序左折叠
+    if (expr->ty == TY_PTR) {
+      SCEVExpr *pointer = nullptr;
+      for (SCEVExpr *operand : expr->nary.ops)
+        if (operand && operand->kind != SCEVExpr::K_CONSTANT &&
+            operand->ty == TY_PTR)
+          pointer = operand;
+      result = expand(pointer, insertBefore);
+      if (!result || result->getType() != TY_PTR)
+        return nullptr;
+      for (SCEVExpr *operand : expr->nary.ops) {
+        if (operand == pointer)
+          continue;
+        const ScaledPointerOffset scaled = matchScaledPointerOffset(operand);
+        Inst *offset =
+            expand(scaled.index ? scaled.index : operand, insertBefore);
+        if (!offset || offset->getType() != TY_I32)
+          return nullptr;
+        builder_.setInsertBefore(insertBefore);
+        result = builder_.emitGetPtr(result, offset,
+                                     scaled.index ? scaled.stride : 1);
+      }
+      break;
+    }
+
+    // 整数多元加法按操作数顺序左折叠
     result = expand(expr->nary.ops[0], insertBefore);
     if (!result)
       return nullptr;
@@ -256,23 +335,7 @@ Inst *SCEVExpander::expand(SCEVExpr *expr, Inst *insertBefore) {
       if (!rhs)
         return nullptr;
       builder_.setInsertBefore(insertBefore);
-
-      // 指针加法使用 OP_GETPTR 原始步长已吸收到偏移中, 物化步长固定为 1
-      IRType lty = result->getType(), rty = rhs->getType();
-      if (lty == TY_PTR && rty == TY_PTR) {
-        // LIR 不支持指针相加
-        return nullptr;
-      }
-      if (lty == TY_PTR) {
-        result = builder_.emitGetPtr(result, rhs);
-        result->setStride(1);
-      } else if (rty == TY_PTR) {
-        result = builder_.emitGetPtr(rhs, result);
-        result->setStride(1);
-      } else {
-        // 两侧均为整数时使用标准 OP_ADD
-        result = builder_.emit(OP_ADD, TY_I32, result, rhs);
-      }
+      result = builder_.emit(OP_ADD, TY_I32, result, rhs);
     }
     break;
   }

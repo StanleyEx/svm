@@ -27,6 +27,14 @@ MathBounds internalMathBounds(i64 min, i64 max) noexcept {
                     : MathBounds::none();
 }
 
+bool fitsMathDomain(IRType type, i64 min, i64 max) noexcept {
+  return type == TY_I64 || fitsI32(min, max);
+}
+
+NoWrapKind mathNoWrapKind(IRType type) noexcept {
+  return type == TY_I64 ? NoWrapKind::PointerSigned : NoWrapKind::I32Signed;
+}
+
 /// @brief 按表达式类型给出未收窄的 i32 值域兜底
 I32Range widenForTy(IRType ty) {
   if (ty == TY_I32)
@@ -101,6 +109,12 @@ MathBounds SCEV::getSignedDeltaBounds(SCEVExpr *lhs, SCEVExpr *rhs,
                                       const MathQuery &q) const {
   if (!lhs || !rhs)
     return MathBounds::none();
+  if (lhs == rhs || lhs->structurallyEquals(rhs)) {
+    const NoWrapKind kind = isPtr(lhs->ty) || lhs->ty == TY_I64
+                                ? NoWrapKind::PointerSigned
+                                : NoWrapKind::I32Signed;
+    return MathBounds::of(0, 0, NoWrapInfo{kind, NoWrapSource::RangeProof});
+  }
 
   struct ComparablePart {
     SCEVExpr *root = nullptr;   // 指针表达式共享的不透明根
@@ -117,11 +131,11 @@ MathBounds SCEV::getSignedDeltaBounds(SCEVExpr *lhs, SCEVExpr *rhs,
 
     switch (expr->kind) {
     case SCEVExpr::K_CONSTANT:
-      return {nullptr, getConstant(expr->cst.v, TY_I32), true};
+      return {nullptr, getConstant(expr->cst.v, TY_I64), true};
     case SCEVExpr::K_UNKNOWN:
-      return {expr, getConstant(0, TY_I32), true};
+      return {expr, getConstant(0, TY_I64), true};
     case SCEVExpr::K_ADD: {
-      ComparablePart result{nullptr, getConstant(0, TY_I32), true};
+      ComparablePart result{nullptr, getConstant(0, TY_I64), true};
       for (SCEVExpr *operand : expr->nary.ops) {
         ComparablePart part = self(operand, self);
         if (!part.valid || (result.root && part.root))
@@ -175,7 +189,7 @@ MathBounds SCEV::getSignedDeltaBounds(SCEVExpr *lhs, SCEVExpr *rhs,
   return proveMathBoundsNoWrap(delta, q);
 }
 
-// 无回绕证明递归计算数学整数端点, 任一步越出 i32 都会保守失败
+// 无回绕证明递归计算数学整数端点, i32机器算术和pointer-width算术分域校验
 // 带 contextBlock 的块敏感证明结果不进入全局缓存
 bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
                          MathBounds &mathRange, NoWrapSource &src,
@@ -189,7 +203,7 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
   // 常量: 值本身即数学区间;落在 i32 即无回绕
   case SCEVExpr::K_CONSTANT:
     mathRange = internalMathBounds(expr->cst.v, expr->cst.v);
-    if (fitsI32(expr->cst.v)) {
+    if (fitsMathDomain(expr->ty, expr->cst.v, expr->cst.v)) {
       src = NoWrapSource::RangeProof;
       return true;
     }
@@ -225,7 +239,7 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
       if (!checkedAdd(lo, r.min, lo) || !checkedAdd(hi, r.max, hi))
         return false;
     }
-    if (!fitsI32(lo, hi))
+    if (!fitsMathDomain(expr->ty, lo, hi))
       return false;
     mathRange = internalMathBounds(lo, hi);
     src = NoWrapSource::RangeProof;
@@ -256,12 +270,12 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
       i64 nlo = *std::min_element(std::begin(products), std::end(products));
       i64 nhi = *std::max_element(std::begin(products), std::end(products));
       // 越出 i32 时机器求值必然回绕
-      if (!fitsI32(nlo, nhi))
+      if (!fitsMathDomain(expr->ty, nlo, nhi))
         return false;
       lo = nlo;
       hi = nhi;
     }
-    if (!started || !fitsI32(lo, hi))
+    if (!started || !fitsMathDomain(expr->ty, lo, hi))
       return false;
     mathRange = internalMathBounds(lo, hi);
     src = NoWrapSource::RangeProof;
@@ -272,6 +286,8 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
   //   INT32_MIN/-1 = 2^31 这种唯一的 i32 除法溢出会令商端点越界
   //   -> fitsI32 自动失败
   case SCEVExpr::K_SDIV: {
+    if (expr->ty == TY_I64)
+      return false;
     MathBounds a, b;
     NoWrapSource sa, sb;
     if (!computeNoWrap(expr->bin.lhs, q, a, sa, depth + 1) || !a.valid)
@@ -293,6 +309,8 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
 
   // 有符号取余:|a%b| < |b|; INT_MIN%-1 可能发生时保守放弃
   case SCEVExpr::K_SREM: {
+    if (expr->ty == TY_I64)
+      return false;
     MathBounds a, b;
     NoWrapSource sa, sb;
     if (!computeNoWrap(expr->bin.lhs, q, a, sa, depth + 1) || !a.valid)
@@ -316,6 +334,16 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
       return false;
     if (!computeNoWrap(expr->addRec.step, q, sr, ssr, depth + 1) || !sr.valid)
       return false;
+
+    MathBounds contextualRange;
+    if (expr->ty != TY_I64 &&
+        proveAddRecNoSignedWrap(expr->addRec.base, expr->addRec.step, L, q,
+                                &contextualRange) &&
+        contextualRange.valid) {
+      mathRange = contextualRange;
+      src = NoWrapSource::LoopBoundProof;
+      return true;
+    }
 
     // 优先使用精确迭代次数 否则使用 BTC 值域的上界
     i64 T = -1;
@@ -342,7 +370,7 @@ bool SCEV::computeNoWrap(SCEVExpr *expr, const MathQuery &q,
     i64 smax = std::max(i64{0}, std::max(s1, s2));
     i64 lo, hi;
     if (!checkedAdd(br.min, smin, lo) || !checkedAdd(br.max, smax, hi) ||
-        !fitsI32(lo, hi))
+        !fitsMathDomain(expr->ty, lo, hi))
       return false;
     mathRange = internalMathBounds(lo, hi);
     src = NoWrapSource::LoopBoundProof;
@@ -358,7 +386,8 @@ MathBounds SCEV::proveMathBoundsNoWrap(SCEVExpr *expr,
   NoWrapSource src;
   // 唯一递归证明器同时验证必要子表达式无有符号回绕并计算数学端点
   if (computeNoWrap(expr, q, r, src, 0) && r.valid && r.min <= r.max)
-    return MathBounds::of(r.min, r.max, NoWrapInfo{NoWrapKind::I32Signed, src});
+    return MathBounds::of(r.min, r.max,
+                          NoWrapInfo{mathNoWrapKind(expr->ty), src});
   return MathBounds::none();
 }
 

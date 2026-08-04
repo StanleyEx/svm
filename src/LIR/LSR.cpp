@@ -1,11 +1,12 @@
 #include "Analysis.h"
 #include "LIRPass.h"
-#include "LSRAddress.h"
 #include "LoopShape.h"
+#include "SCEVLinearizer.h"
 #include "Utils.h"
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <unordered_set>
 #include <vector>
@@ -13,45 +14,463 @@
 namespace svm::ir {
 namespace {
 
-using namespace lsr_address;
+struct AddRecurrence {
+  Loop *loop = nullptr;     // 递推所属循环
+  SCEVExpr *base = nullptr; // 第零次迭代地址
+  SCEVExpr *step = nullptr; // 每轮字节步长
+};
+
+enum class AddressEvolutionKind : u8 {
+  None,            // 不可折减
+  CanonicalAddRec, // 标准SCEV AddRec
+  EdgeLocalPhi,    // 非规范header Phi的边局部递推
+};
+
+struct CanonicalAddressEvolution {
+  Loop *loop = nullptr;     // 递推所属循环
+  SCEVExpr *base = nullptr; // 第零次迭代地址
+  SCEVExpr *step = nullptr; // 常量字节步长
+};
+
+struct EdgeLocalAddressEvolution {
+  Loop *loop = nullptr; // Phi所属循环
+  Inst *root = nullptr; // 循环不变的指针根
+  Inst *phi = nullptr;  // header标量Phi
+  i64 coefficient = 0;  // 标量Phi的字节系数
+  i64 constant = 0;     // 固定字节偏移
+};
+
+struct AddressEvolution {
+  AddressEvolutionKind kind = AddressEvolutionKind::None; // 分类结果
+  Inst *getPtr = nullptr;                                 // 原GETPTR
+  Inst *root = nullptr;                                   // 别名根
+  CanonicalAddressEvolution canonical;                    // 标准递推事实
+  EdgeLocalAddressEvolution edgeLocal;                    // 边局部事实
+};
+
+bool valueDependsOnAny(Inst *root, const std::unordered_set<Inst *> &values) {
+  std::unordered_set<Inst *> visited;
+  std::vector<Inst *> worklist;
+  if (root)
+    worklist.push_back(root);
+  while (!worklist.empty()) {
+    Inst *value = worklist.back();
+    worklist.pop_back();
+    if (!value || !visited.insert(value).second)
+      continue;
+    if (values.count(value))
+      return true;
+    for (u32 index = 0; index < value->getOperandCount(); ++index)
+      worklist.push_back(value->getArg(index));
+  }
+  return false;
+}
+
+bool rootAvailableAtLoopEntry(Inst *root, const Loop *loop,
+                              const DominatorTree *dominatorTree) noexcept {
+  if (!root || !loop)
+    return false;
+  BasicBlock *definition = root->parentBlock();
+  return !definition || (!loop->contains(definition) && dominatorTree &&
+                         dominatorTree->dominates(definition, loop->header()));
+}
+
+Inst *resolveHeaderPhiAlias(Inst *value, const LoopInfo *loopInfo) {
+  if (!value || value->getOp() != OP_PHI || value->getType() != TY_I32 ||
+      !loopInfo)
+    return nullptr;
+  if (value->parentBlock() && loopInfo->isLoopHeader(value->parentBlock()))
+    return value;
+
+  Inst *candidate = nullptr;
+  for (u32 index = 0; index < value->getOperandCount(); ++index) {
+    Inst *incoming = value->getArg(index);
+    if (!incoming || incoming->getOp() != OP_PHI ||
+        incoming->getType() != TY_I32 || !incoming->parentBlock() ||
+        !loopInfo->isLoopHeader(incoming->parentBlock()))
+      return nullptr;
+    if (!candidate)
+      candidate = incoming;
+    else if (candidate != incoming)
+      return nullptr;
+  }
+  return candidate;
+}
+
+struct AddRecParts {
+  Loop *loop = nullptr;          // 已发现的唯一循环
+  SCEVExpr *base = nullptr;      // 合并后的递推初值
+  SCEVExpr *step = nullptr;      // 合并后的递推步长
+  SCEVExpr *invariant = nullptr; // 递推外的不变量
+  bool hasRecurrence = false;    // 是否发现AddRec
+};
+
+SCEVExpr *scaleSCEV(const SCEV *scev, SCEVExpr *expression, i64 coefficient) {
+  if (!scev || !expression)
+    return nullptr;
+  if (coefficient == 1)
+    return expression;
+  const IRType coefficientType =
+      isPtr(expression->ty) ? TY_I64 : expression->ty;
+  return scev->getMulExpr(expression,
+                          scev->getConstant(coefficient, coefficientType));
+}
+
+bool mergeAddRecParts(const SCEV *scev, AddRecParts &destination,
+                      const AddRecParts &source) {
+  if (source.invariant)
+    destination.invariant =
+        destination.invariant
+            ? scev->getAddExpr(destination.invariant, source.invariant)
+            : source.invariant;
+  if (!source.hasRecurrence)
+    return true;
+  if (!source.loop || !source.base || !source.step)
+    return false;
+  if (!destination.hasRecurrence) {
+    destination.loop = source.loop;
+    destination.base = source.base;
+    destination.step = source.step;
+    destination.hasRecurrence = true;
+    return true;
+  }
+  if (destination.loop != source.loop)
+    return false;
+  destination.base = scev->getAddExpr(destination.base, source.base);
+  destination.step = scev->getAddExpr(destination.step, source.step);
+  return true;
+}
+
+bool appendInvariant(const SCEV *scev, AddRecParts &parts, SCEVExpr *expression,
+                     i64 coefficient) {
+  SCEVExpr *scaled = scaleSCEV(scev, expression, coefficient);
+  if (!scaled)
+    return false;
+  parts.invariant =
+      parts.invariant ? scev->getAddExpr(parts.invariant, scaled) : scaled;
+  return true;
+}
+
+bool decomposeAddRecurrence(const SCEV *scev, SCEVExpr *expression,
+                            Loop *target, i64 scale, AddRecParts &result,
+                            u32 depth) {
+  if (!scev || !expression || depth > 64)
+    return false;
+  const SCEVLinearForm form =
+      SCEVLinearizer(4096, 64).linearize(expression, scale);
+  if (!form.exact())
+    return false;
+
+  if (form.constant != 0) {
+    const IRType type = isPtr(expression->ty) ? TY_I64 : expression->ty;
+    if (!appendInvariant(scev, result, scev->getConstant(form.constant, type),
+                         1))
+      return false;
+  }
+  for (const SCEVLinearTerm &term : form.terms) {
+    SCEVExpr *atom = term.atom;
+    if (!atom)
+      return false;
+    if (atom->kind == SCEVExpr::K_UNKNOWN && atom->unk.val &&
+        atom->unk.val->getOp() == OP_PHI) {
+      SCEVExpr *current = scev->getSCEV(atom->unk.val);
+      if (current && current != atom) {
+        AddRecParts part;
+        if (!decomposeAddRecurrence(scev, current, target, term.coefficient,
+                                    part, depth + 1) ||
+            !mergeAddRecParts(scev, result, part))
+          return false;
+        continue;
+      }
+    }
+    if (atom->kind == SCEVExpr::K_ADDREC &&
+        (!target || atom->addRec.loop == target)) {
+      AddRecParts part;
+      part.loop = atom->addRec.loop;
+      part.base = scaleSCEV(scev, atom->addRec.base, term.coefficient);
+      part.step = scaleSCEV(scev, atom->addRec.step, term.coefficient);
+      part.hasRecurrence = true;
+      if (!mergeAddRecParts(scev, result, part))
+        return false;
+      continue;
+    }
+    if (target && !atom->isLoopInvariant(target))
+      return false;
+    if (!appendInvariant(scev, result, atom, term.coefficient))
+      return false;
+  }
+  return true;
+}
+
+std::optional<AddRecurrence> findAddRecurrenceForLoop(const SCEV *scev,
+                                                      SCEVExpr *expression,
+                                                      Loop *preferredLoop) {
+  if (!scev || !expression)
+    return std::nullopt;
+  const auto findFor = [&](Loop *target) -> std::optional<AddRecurrence> {
+    AddRecParts parts;
+    if (!decomposeAddRecurrence(scev, expression, target, 1, parts, 0) ||
+        !parts.hasRecurrence ||
+        (parts.invariant && !parts.invariant->isLoopInvariant(parts.loop)))
+      return std::nullopt;
+    SCEVExpr *base = parts.invariant
+                         ? scev->getAddExpr(parts.base, parts.invariant)
+                         : parts.base;
+    if (!parts.loop || !base || !parts.step)
+      return std::nullopt;
+    return AddRecurrence{parts.loop, base, parts.step};
+  };
+
+  if (preferredLoop)
+    if (auto recurrence = findFor(preferredLoop))
+      return recurrence;
+  return findFor(nullptr);
+}
+
+std::optional<AddressEvolution>
+classifyAddressEvolution(const SCEV *scev, const LoopInfo *loopInfo,
+                         Inst *getPtr, const LoopShapeInfo *loopShape,
+                         const AliasInfo *aliasInfo,
+                         const DominatorTree *dominatorTree) {
+  if (!scev || !getPtr || getPtr->getOp() != OP_GETPTR)
+    return std::nullopt;
+
+  AddressEvolution evolution;
+  evolution.getPtr = getPtr;
+  evolution.root = aliasInfo ? aliasInfo->info(getPtr).root : nullptr;
+  SCEVExpr *address = scev->getSCEV(getPtr);
+  Loop *preferred = loopInfo && getPtr->parentBlock()
+                        ? loopInfo->getLoopFor(getPtr->parentBlock())
+                        : nullptr;
+
+  Inst *baseOperand = getPtr->getOperandCount() ? getPtr->getArg(0) : nullptr;
+  if (loopShape && loopInfo && baseOperand && address) {
+    SCEVExpr *base = scev->getSCEV(baseOperand);
+    SCEVExpr *offset = scev->getAddExpr(
+        address, scev->getMulExpr(base, scev->getConstant(-1, base->ty)));
+    const SCEVLinearForm form = SCEVLinearizer(4096, 64).linearize(offset);
+    Inst *phi = nullptr;
+    i64 coefficient = 0;
+    bool valid = form.exact();
+    for (const SCEVLinearTerm &term : form.terms) {
+      if (!valid || !term.atom || term.atom->kind != SCEVExpr::K_UNKNOWN) {
+        valid = false;
+        break;
+      }
+      Inst *symbol = resolveHeaderPhiAlias(term.atom->unk.val, loopInfo);
+      if (!symbol || (phi && phi != symbol) ||
+          !checkedAdd(coefficient, term.coefficient, coefficient)) {
+        valid = false;
+        break;
+      }
+      phi = symbol;
+    }
+    Loop *loop = phi && phi->parentBlock()
+                     ? loopInfo->getLoopFor(phi->parentBlock())
+                     : nullptr;
+    const bool inScope =
+        loop && getPtr->parentBlock() &&
+        (loop->contains(getPtr->parentBlock()) ||
+         (dominatorTree &&
+          dominatorTree->dominates(loop->header(), getPtr->parentBlock())));
+    if (valid && phi && coefficient != 0 && fitsI32(coefficient) &&
+        fitsI32(form.constant) && inScope &&
+        loop->header() == phi->parentBlock() &&
+        rootAvailableAtLoopEntry(baseOperand, loop, dominatorTree)) {
+      const auto transfer = loopShape->getHeaderPhiTransfer(phi);
+      if (transfer && transfer->hasNonzeroSelfDelta) {
+        evolution.kind = AddressEvolutionKind::EdgeLocalPhi;
+        evolution.edgeLocal = {loop, baseOperand, phi, coefficient,
+                               form.constant};
+        return evolution;
+      }
+    }
+  }
+
+  if (auto recurrence = findAddRecurrenceForLoop(scev, address, preferred)) {
+    Loop *loop = recurrence->loop;
+    bool valid = loop && loop->latches().size() == 1 && loop->getPreheader() &&
+                 getPtr->parentBlock() &&
+                 loop->contains(getPtr->parentBlock()) &&
+                 recurrence->base->isLoopInvariant(loop);
+    valid = valid && recurrence->step->isConstant() &&
+            fitsI32(recurrence->step->cst.v);
+    if (valid) {
+      evolution.kind = AddressEvolutionKind::CanonicalAddRec;
+      evolution.canonical = {loop, recurrence->base, recurrence->step};
+      return evolution;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<i64> constantAddressDelta(const SCEV &scev, SCEVExpr *left,
+                                        SCEVExpr *right,
+                                        const MathQuery &query = {}) {
+  while (left && right && isPtr(left->ty) && isPtr(right->ty) &&
+         left->kind == SCEVExpr::K_ADDREC &&
+         right->kind == SCEVExpr::K_ADDREC &&
+         left->addRec.loop == right->addRec.loop && left->addRec.step &&
+         right->addRec.step &&
+         left->addRec.step->structurallyEquals(right->addRec.step)) {
+    left = left->addRec.base;
+    right = right->addRec.base;
+  }
+  const MathBounds delta = scev.getSignedDeltaBounds(left, right, query);
+  if (!delta.valid || delta.min != delta.max || !fitsI32(delta.min))
+    return std::nullopt;
+  return delta.min;
+}
+
+class ExpansionSession {
+public:
+  // 绑定本轮LSR的SCEV物化上下文
+  ExpansionSession(Function *function, const SCEV *scev) noexcept
+      : scev_(scev), expander_(function, scev),
+        builder_(function->module, function) {}
+
+  // 登记支配循环内查询点的pointer递推
+  void registerAvailableAddRec(SCEVExpr *base, SCEVExpr *step, Loop *loop,
+                               Inst *value) {
+    if (!base || !step || !loop || !value)
+      return;
+    SCEVExpr *addRec = scev_->getAddRecExpr(base, step, loop);
+    for (const Available &available : available_)
+      if (available.loop == loop && available.addRec &&
+          available.addRec->structurallyEquals(addRec))
+        return;
+    available_.push_back({loop, addRec, value});
+  }
+
+  // 查询同一循环中已经物化的精确递推
+  Inst *findAvailableAddRec(SCEVExpr *base, SCEVExpr *step, Loop *loop) const {
+    if (!base || !step || !loop)
+      return nullptr;
+    SCEVExpr *wanted = scev_->getAddRecExpr(base, step, loop);
+    for (const Available &available : available_)
+      if (available.loop == loop && available.value && available.addRec &&
+          available.addRec->structurallyEquals(wanted))
+        return available.value;
+    return nullptr;
+  }
+
+  // 优先复用本轮递推 再退回通用SCEV物化
+  Inst *expandCodeFor(SCEVExpr *expression, Inst *insertBefore) {
+    if (!expression || !insertBefore || !insertBefore->parentBlock())
+      return nullptr;
+    for (const Available &available : available_) {
+      if (!available.loop || !available.value || !available.addRec ||
+          !available.loop->contains(insertBefore->parentBlock()))
+        continue;
+      const MathBounds delta =
+          scev_->getSignedDeltaBounds(expression, available.addRec);
+      if (!delta.valid || delta.min != delta.max || !fitsI32(delta.min))
+        continue;
+      if (delta.min == 0)
+        return available.value;
+      builder_.setInsertBefore(insertBefore);
+      Inst *pointer = builder_.emitGetPtr(
+          available.value, builder_.iConst(static_cast<i32>(delta.min)));
+      pointer->setStride(1);
+      return pointer;
+    }
+    return expander_.expandCodeFor(expression, insertBefore);
+  }
+
+  // 查询表达式能否由已有递推和常量偏移得到
+  bool hasAvailableFor(SCEVExpr *expression, BasicBlock *block) const {
+    if (!expression || !block)
+      return false;
+    for (const Available &available : available_) {
+      if (!available.loop || !available.value || !available.addRec ||
+          !available.loop->contains(block))
+        continue;
+      const MathBounds delta =
+          scev_->getSignedDeltaBounds(expression, available.addRec);
+      if (delta.valid && delta.min == delta.max && fitsI32(delta.min))
+        return true;
+    }
+    return false;
+  }
+
+  // 预检表达式是否依赖本轮待替换地址
+  bool dependsOnAny(SCEVExpr *expression,
+                    const std::unordered_set<Inst *> &values) const {
+    std::unordered_set<SCEVExpr *> visited;
+    std::vector<SCEVExpr *> worklist;
+    if (expression)
+      worklist.push_back(expression);
+    while (!worklist.empty()) {
+      SCEVExpr *current = worklist.back();
+      worklist.pop_back();
+      if (!current || !visited.insert(current).second)
+        continue;
+      for (Inst *value : values)
+        if (current->structurallyEquals(scev_->getSCEV(value)))
+          return true;
+      switch (current->kind) {
+      case SCEVExpr::K_UNKNOWN:
+        if (valueDependsOnAny(current->unk.val, values))
+          return true;
+        break;
+      case SCEVExpr::K_ADD:
+      case SCEVExpr::K_MUL:
+        worklist.insert(worklist.end(), current->nary.ops.begin(),
+                        current->nary.ops.end());
+        break;
+      case SCEVExpr::K_ADDREC:
+        worklist.push_back(current->addRec.base);
+        worklist.push_back(current->addRec.step);
+        break;
+      case SCEVExpr::K_SDIV:
+      case SCEVExpr::K_SREM:
+        worklist.push_back(current->bin.lhs);
+        worklist.push_back(current->bin.rhs);
+        break;
+      case SCEVExpr::K_CONSTANT:
+        break;
+      }
+    }
+    return false;
+  }
+
+private:
+  struct Available {
+    Loop *loop = nullptr;       // 递推所属循环
+    SCEVExpr *addRec = nullptr; // 完整递推表达式
+    Inst *value = nullptr;      // 已有pointer Phi
+  };
+
+  const SCEV *scev_ = nullptr;       // 标量演化事实
+  SCEVExpander expander_;            // 通用物化器
+  IRBuilder builder_;                // 常量偏移地址构造器
+  std::vector<Available> available_; // 本轮新建递推
+};
 
 bool fitsTargetMemoryOffset(i64 value) noexcept {
   return value >= -2048 && value <= 2047;
 }
 
-i32 useCount(Inst *inst) noexcept {
+i32 terminalUseCount(Inst *inst) noexcept {
   i32 count = 0;
   for (const Use *use = inst ? inst->uses() : nullptr; use; use = use->next)
-    ++count;
+    count += !use->user || use->user->getOp() != OP_GETPTR || use->argNo != 0;
   return count;
-}
-
-Inst *emitScaledOffset(IRBuilder &builder, Inst *scalar, i64 coefficient,
-                       i64 constant, Inst *insertBefore) {
-  if (!scalar || !insertBefore || !fitsI32(coefficient) || !fitsI32(constant))
-    return nullptr;
-  builder.setInsertBefore(insertBefore);
-  Inst *offset = scalar;
-  if (coefficient != 1)
-    offset = builder.emit(OP_MUL, TY_I32, scalar,
-                          builder.iConst(static_cast<i32>(coefficient)));
-  if (constant != 0) {
-    builder.setInsertBefore(insertBefore);
-    offset = builder.emit(OP_ADD, TY_I32, offset,
-                          builder.iConst(static_cast<i32>(constant)));
-  }
-  return offset;
 }
 
 Inst *emitAddressForScalar(IRBuilder &builder, Inst *root, Inst *scalar,
                            i64 coefficient, i64 constant, Inst *insertBefore) {
-  Inst *offset =
-      emitScaledOffset(builder, scalar, coefficient, constant, insertBefore);
-  if (!root || !offset)
+  if (!root || !scalar || !insertBefore || coefficient <= 0 ||
+      !fitsI32(coefficient) || !fitsI32(constant))
     return nullptr;
   builder.setInsertBefore(insertBefore);
-  Inst *pointer = builder.emitGetPtr(root, offset);
-  pointer->setStride(1);
+  Inst *pointer =
+      builder.emitGetPtr(root, scalar, static_cast<i32>(coefficient));
+  if (constant != 0) {
+    builder.setInsertBefore(insertBefore);
+    pointer =
+        builder.emitGetPtr(pointer, builder.iConst(static_cast<i32>(constant)));
+  }
   return pointer;
 }
 
@@ -76,6 +495,7 @@ struct LSRUse {
 struct CanonicalGroup {
   Loop *loop = nullptr;       // 递推所属循环
   i64 step = 0;               // 共同字节步长
+  IRType stepType = TY_I32;   // SCEV步长的数学域
   std::vector<LSRUse *> uses; // 同 root/step 候选
 };
 
@@ -88,8 +508,9 @@ struct EdgeGroup {
 };
 
 struct RewritePlan {
-  std::vector<LSRUse> uses;                    // 全部已分类候选
-  std::unordered_set<Inst *> originalGetPtrs;  // 原 GETPTR 集合
+  std::vector<LSRUse> uses;                    // root及其可物化地址依赖
+  std::unordered_set<Inst *> originalGetPtrs;  // 所有可能被替换的原GETPTR
+  std::vector<Inst *> addressNodes;            // root依赖的原地址链节点
   std::vector<CanonicalGroup> canonicalGroups; // 标准递推组
   std::vector<EdgeGroup> edgeGroups;           // 边局部递推组
 };
@@ -112,6 +533,7 @@ using CFGEdge = std::pair<BasicBlock *, BasicBlock *>;
 constexpr i32 kMaxRecurrencesPerLoop = 8;
 constexpr i32 kMaxEdgeRecurrencesPerLoop = 8;
 constexpr i32 kMaxRowRecurrencesPerOuter = 8;
+constexpr u32 kMaxAddressRecurrenceDepth = 8;
 
 bool shouldBuildLanes(
     const std::vector<std::pair<LSRUse *, i64>> &lanes) noexcept {
@@ -150,7 +572,8 @@ std::optional<EdgeRewritePlan> planEdgeRewrite(const EdgeGroup &group,
       transfer->incoming.size() != group.phi->getOperandCount())
     return std::nullopt;
   const auto validLeaf = [&](const HeaderPhiIncomingTransfer &incoming) {
-    if (!incoming.predecessor || !incoming.predecessor->endsWithTerminator())
+    if (!incoming.predecessor || !incoming.predecessor->endsWithTerminator() ||
+        group.coefficient <= 0 || !fitsI32(group.coefficient))
       return false;
     if (incoming.kind == HeaderPhiIncomingKind::SelfDelta) {
       i64 step = 0;
@@ -204,9 +627,9 @@ planCanonicalReuse(const EdgeGroup &group, const EdgeRewritePlan &plan,
   SCEVExpr *index = scev.getSCEV(initial);
   SCEVExpr *base = scev.getAddExpr(
       scev.getSCEV(group.root),
-      scev.getMulExpr(index, scev.getConstant(group.coefficient, index->ty)));
+      scev.getMulExpr(index, scev.getConstant(group.coefficient, TY_I64)));
   if (plan.minimum != 0)
-    base = scev.getAddExpr(base, scev.getConstant(plan.minimum, index->ty));
+    base = scev.getAddExpr(base, scev.getConstant(plan.minimum, TY_I64));
   return CanonicalReuseQuery{group.loop, group.root, step, base};
 }
 
@@ -215,11 +638,12 @@ public:
   Rewriter(Function *function, const SCEV *scev, const LoopShapeInfo *loopShape,
            ExpansionSession &session,
            const std::unordered_set<Inst *> &originalGetPtrs,
+           const std::vector<Inst *> &addressNodes,
            const std::vector<CFGEdge> &failedResetEdges) noexcept
       : function_(function), builder_(function->module, function), scev_(scev),
         loopShape_(loopShape), session_(session),
-        originalGetPtrs_(originalGetPtrs), failedResetEdges_(failedResetEdges) {
-  }
+        originalGetPtrs_(originalGetPtrs), addressNodes_(addressNodes),
+        failedResetEdges_(failedResetEdges) {}
 
   // 聚合同root/step的标准AddRec lane
   void rewriteCanonicalGroup(CanonicalGroup &group) {
@@ -234,13 +658,16 @@ public:
       };
       std::vector<RawLane> raw{{group.uses[seed], 0}};
       SCEVExpr *seedBase = group.uses[seed]->evolution.canonical.base;
+      MathQuery deltaQuery;
+      deltaQuery.contextBlock = group.loop->getPreheader();
       for (usize index = seed + 1; index < group.uses.size(); ++index) {
         if (used[index])
           continue;
-        const MathBounds delta = scev_->getSignedDeltaBounds(
-            group.uses[index]->evolution.canonical.base, seedBase);
-        if (delta.valid && delta.min == delta.max && fitsI32(delta.min))
-          raw.push_back({group.uses[index], delta.min});
+        const std::optional<i64> delta = constantAddressDelta(
+            *scev_, group.uses[index]->evolution.canonical.base, seedBase,
+            deltaQuery);
+        if (delta)
+          raw.push_back({group.uses[index], *delta});
       }
       std::stable_sort(raw.begin(), raw.end(),
                        [](const RawLane &left, const RawLane &right) {
@@ -301,7 +728,8 @@ public:
           first = end;
           continue;
         }
-        Inst *phi = buildRecurrence(group.loop, representativeBase, group.step);
+        Inst *phi = buildRecurrence(group.loop, representativeBase, group.step,
+                                    group.stepType);
         if (!phi) {
           markSeed(lanes);
           first = end;
@@ -384,6 +812,15 @@ public:
     for (const Replacement &replacement : replacements_)
       if (replacement.from->hasNoUses())
         VERIFY(replacement.from->eraseFromBlock());
+    bool erasedAddress = true;
+    while (erasedAddress) {
+      erasedAddress = false;
+      for (Inst *address : addressNodes_)
+        if (address && address->parentBlock() && address->hasNoUses()) {
+          VERIFY(address->eraseFromBlock());
+          erasedAddress = true;
+        }
+    }
     return true;
   }
 
@@ -412,25 +849,71 @@ private:
     return false;
   }
 
+  // 校验标准pointer Phi所需的循环结构
+  bool hasCanonicalLoopForm(Loop *loop) const noexcept {
+    if (!loop || loop->latches().size() != 1 || !loop->getPreheader() ||
+        !loop->header())
+      return false;
+    BasicBlock *preheader = loop->getPreheader();
+    BasicBlock *latch = loop->latches().front();
+    if (!preheader->endsWithTerminator() || !latch->endsWithTerminator())
+      return false;
+    for (u32 index = 0; index < loop->header()->getPredecessorCount();
+         ++index) {
+      BasicBlock *predecessor = loop->header()->getPredecessor(index);
+      if (predecessor != preheader && predecessor != latch)
+        return false;
+    }
+    return true;
+  }
+
+  // 在写IR前递归校验外层row-base递推DAG
+  bool isMaterializableAt(Loop *inner, SCEVExpr *base,
+                          std::unordered_set<Loop *> &visiting,
+                          u32 depth) const {
+    BasicBlock *preheader = inner ? inner->getPreheader() : nullptr;
+    if (!inner || !base || !preheader || depth > kMaxAddressRecurrenceDepth)
+      return false;
+    if (session_.hasAvailableFor(base, preheader))
+      return true;
+
+    const auto recurrence =
+        findAddRecurrenceForLoop(scev_, base, inner->parent());
+    if (!recurrence)
+      return scev_->isSafeToExpand(base, preheader) &&
+             !session_.dependsOnAny(base, originalGetPtrs_);
+    Loop *outer = recurrence->loop;
+    if (!outer || outer == inner || !outer->contains(preheader) ||
+        !hasCanonicalLoopForm(outer) || !recurrence->step->isConstant() ||
+        !fitsI32(recurrence->step->cst.v) ||
+        !recurrence->base->isLoopInvariant(outer) ||
+        (rowPerOuter_.find(outer) != rowPerOuter_.end() &&
+         rowPerOuter_.at(outer) >= kMaxRowRecurrencesPerOuter) ||
+        !visiting.insert(outer).second)
+      return false;
+    const bool valid =
+        isMaterializableAt(outer, recurrence->base, visiting, depth + 1);
+    visiting.erase(outer);
+    return valid;
+  }
+
   // 构建标准preheader/header/latch pointer recurrence
-  Inst *buildRecurrence(Loop *loop, SCEVExpr *base, i64 step) {
-    if (!loop || !base || !fitsI32(step) || loop->latches().size() != 1)
+  Inst *buildRecurrence(Loop *loop, SCEVExpr *base, i64 step, IRType stepType) {
+    if (!loop || !base || !fitsI32(step) || !hasCanonicalLoopForm(loop))
       return nullptr;
+    SCEVExpr *stepExpression = scev_->getConstant(step, stepType);
+    if (Inst *available =
+            session_.findAvailableAddRec(base, stepExpression, loop))
+      return available;
     BasicBlock *preheader = loop->getPreheader();
     BasicBlock *header = loop->header();
     BasicBlock *latch = loop->latches().front();
-    if (!preheader || !header || !preheader->endsWithTerminator() ||
-        !latch->endsWithTerminator())
+    std::unordered_set<Loop *> visiting{loop};
+    if (!isMaterializableAt(loop, base, visiting, 0))
       return nullptr;
-    for (u32 index = 0; index < header->getPredecessorCount(); ++index) {
-      BasicBlock *predecessor = header->getPredecessor(index);
-      if (predecessor != preheader && predecessor != latch)
-        return nullptr;
-    }
-    if (session_.dependsOnAny(base, originalGetPtrs_))
+    if (!ensureRowBaseAvailable(loop, base, 0))
       return nullptr;
 
-    ensureRowBaseAvailable(loop, base);
     Inst *initial = session_.expandCodeFor(base, preheader->terminator());
     if (!initial || dependsOnOriginal(initial))
       return nullptr;
@@ -442,44 +925,43 @@ private:
                                        {{phi, initial}}));
     VERIFY(
         CFGEditor::setPhiEdgeValues(function_, header, latch, {{phi, next}}));
-    session_.registerAvailableAddRec(base, scev_->getConstant(step, TY_I32),
-                                     loop, phi);
+    session_.registerAvailableAddRec(base, stepExpression, loop, phi);
     return phi;
   }
 
   // 按需建立包围内层循环的外层row-base递推
-  void ensureRowBaseAvailable(Loop *inner, SCEVExpr *base) {
+  bool ensureRowBaseAvailable(Loop *inner, SCEVExpr *base, u32 depth) {
     BasicBlock *innerPreheader = inner ? inner->getPreheader() : nullptr;
-    if (!innerPreheader || session_.hasAvailableFor(base, innerPreheader))
-      return;
-    const auto recurrence = findAddRecurrence(scev_, base);
+    if (!innerPreheader || depth > kMaxAddressRecurrenceDepth)
+      return false;
+    if (session_.hasAvailableFor(base, innerPreheader))
+      return true;
+    const auto recurrence =
+        findAddRecurrenceForLoop(scev_, base, inner->parent());
     if (!recurrence)
-      return;
+      return true;
     Loop *outer = recurrence->loop;
     if (!outer || outer == inner || !outer->contains(innerPreheader) ||
-        outer->latches().size() != 1 || !outer->getPreheader() ||
-        !recurrence->step->isConstant() || !fitsI32(recurrence->step->cst.v) ||
+        !hasCanonicalLoopForm(outer) || !recurrence->step->isConstant() ||
+        !fitsI32(recurrence->step->cst.v) ||
         !recurrence->base->isLoopInvariant(outer) ||
-        !scev_->isSafeToExpand(recurrence->base, outer->getPreheader()) ||
-        session_.dependsOnAny(recurrence->base, originalGetPtrs_) ||
         rowPerOuter_[outer] >= kMaxRowRecurrencesPerOuter)
-      return;
+      return false;
 
     BasicBlock *preheader = outer->getPreheader();
     BasicBlock *latch = outer->latches().front();
-    if (!preheader->endsWithTerminator() || !latch->endsWithTerminator())
-      return;
-    ensureRowBaseAvailable(outer, recurrence->base);
+    if (!ensureRowBaseAvailable(outer, recurrence->base, depth + 1))
+      return false;
     Inst *initial =
         session_.expandCodeFor(recurrence->base, preheader->terminator());
     if (!initial || dependsOnOriginal(initial))
-      return;
+      return false;
     Inst *phi =
         builder_.emitPhi(TY_PTR, outer->header(), builder_.makeUndef(TY_PTR));
     Inst *next = emitPointerStep(builder_, phi, recurrence->step->cst.v,
                                  latch->terminator());
     if (!next)
-      return;
+      return false;
     VERIFY(CFGEditor::setPhiEdgeValues(function_, outer->header(), preheader,
                                        {{phi, initial}}));
     VERIFY(CFGEditor::setPhiEdgeValues(function_, outer->header(), latch,
@@ -487,6 +969,7 @@ private:
     session_.registerAvailableAddRec(recurrence->base, recurrence->step, outer,
                                      phi);
     ++rowPerOuter_[outer];
+    return session_.hasAvailableFor(base, innerPreheader);
   }
 
   // 按HeaderPhiTransfer逐边建立pointer Phi
@@ -593,7 +1076,8 @@ private:
   const SCEV *scev_ = nullptr;
   const LoopShapeInfo *loopShape_ = nullptr;
   ExpansionSession &session_;                         // 本轮递推复用会话
-  const std::unordered_set<Inst *> &originalGetPtrs_; // 原候选集合
+  const std::unordered_set<Inst *> &originalGetPtrs_; // 原rewrite root集合
+  const std::vector<Inst *> &addressNodes_;           // 原root依赖地址链
   const std::vector<CFGEdge> &failedResetEdges_;      // 未能拆分的Reset边
   std::vector<Replacement> replacements_;             // 延迟提交替换
   std::map<Loop *, i32> pointerPerLoop_;              // 标准递推压力预算
@@ -614,35 +1098,49 @@ bool collectRewritePlan(Function *function, PassContext &context,
   const LoopShapeInfo &loopShape =
       context.get<LoopShapeAnalysis>(function).info;
 
+  std::unordered_set<Inst *> addressNodes;
   for (BasicBlock *block = function->region->first; block;
-       block = block->next()) {
+       block = block->next())
     for (Inst *inst = block->firstInst(); inst; inst = inst->next()) {
-      if (inst->getOp() != OP_GETPTR)
+      if (inst->getOp() != OP_GETPTR || terminalUseCount(inst) == 0)
+        continue;
+      for (Inst *address = inst; address && address->getOp() == OP_GETPTR &&
+                                 addressNodes.insert(address).second;
+           address = address->getArg(0))
+        plan.addressNodes.push_back(address);
+    }
+
+  // 依赖节点只参与递归物化 只有terminal节点进入rewrite分组
+  for (BasicBlock *block = function->region->first; block;
+       block = block->next())
+    for (Inst *inst = block->firstInst(); inst; inst = inst->next()) {
+      if (inst->getOp() != OP_GETPTR || terminalUseCount(inst) == 0)
         continue;
       auto evolution = classifyAddressEvolution(
           &scev, &loopInfo, inst, &loopShape, &aliasInfo, &dominatorTree);
-      if (evolution)
-        plan.uses.push_back({*evolution, useCount(inst)});
+      if (!evolution)
+        continue;
+      plan.uses.push_back({*evolution, terminalUseCount(inst)});
+      plan.originalGetPtrs.insert(inst);
     }
-  }
   if (plan.uses.empty())
     return false;
 
-  for (const LSRUse &use : plan.uses)
-    plan.originalGetPtrs.insert(use.evolution.getPtr);
-
-  std::map<std::tuple<Loop *, Inst *, i64>, usize> canonicalIndex;
+  std::map<std::tuple<Loop *, Inst *, i64, IRType>, usize> canonicalIndex;
   std::map<std::tuple<Inst *, Inst *, i64>, usize> edgeIndex;
   for (LSRUse &use : plan.uses) {
     if (use.evolution.kind == AddressEvolutionKind::CanonicalAddRec) {
       const i64 step = use.evolution.canonical.step->cst.v;
-      const auto key = std::make_tuple(use.evolution.canonical.loop,
-                                       use.evolution.root, step);
+      const auto key =
+          std::make_tuple(use.evolution.canonical.loop, use.evolution.root,
+                          step, use.evolution.canonical.step->ty);
       auto [position, inserted] =
           canonicalIndex.emplace(key, plan.canonicalGroups.size());
       if (inserted)
-        plan.canonicalGroups.push_back(
-            {use.evolution.canonical.loop, step, {}});
+        plan.canonicalGroups.push_back({use.evolution.canonical.loop,
+                                        step,
+                                        use.evolution.canonical.step->ty,
+                                        {}});
       plan.canonicalGroups[position->second].uses.push_back(&use);
     } else if (use.evolution.kind == AddressEvolutionKind::EdgeLocalPhi) {
       const EdgeLocalAddressEvolution &edge = use.evolution.edgeLocal;
@@ -655,6 +1153,10 @@ bool collectRewritePlan(Function *function, PassContext &context,
       plan.edgeGroups[position->second].uses.push_back(&use);
     }
   }
+  std::stable_sort(plan.canonicalGroups.begin(), plan.canonicalGroups.end(),
+                   [](const CanonicalGroup &left, const CanonicalGroup &right) {
+                     return left.loop->depth() < right.loop->depth();
+                   });
   return true;
 }
 
@@ -734,7 +1236,7 @@ bool runLSR(Function *function, PassContext &context, bool &changedCFG) {
       context.get<LoopShapeAnalysis>(function).info;
   ExpansionSession session(function, &scev);
   Rewriter rewriter(function, &scev, &loopShape, session, plan.originalGetPtrs,
-                    failedResetEdges);
+                    plan.addressNodes, failedResetEdges);
   for (CanonicalGroup &group : plan.canonicalGroups)
     rewriter.rewriteCanonicalGroup(group);
   for (EdgeGroup &group : plan.edgeGroups)

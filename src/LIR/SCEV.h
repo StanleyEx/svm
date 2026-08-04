@@ -176,8 +176,9 @@ private:
   // 证明递推
   void proveAndSetAddRecNoWrap(SCEVExpr *expr) const noexcept;
   // 无回绕证明
-  bool proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step,
-                               const Loop *loop) const noexcept;
+  bool proveAddRecNoSignedWrap(SCEVExpr *base, SCEVExpr *step, const Loop *loop,
+                               const MathQuery &query = {},
+                               MathBounds *range = nullptr) const noexcept;
 
   MathBounds proveMathBoundsNoWrap(SCEVExpr *expr,
                                    const MathQuery &query) const;
