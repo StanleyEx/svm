@@ -36,6 +36,42 @@ DECLARE_FUNCTION_PASS(LSRPass);
 
 DECLARE_FUNCTION_PASS(LCSSAPass);
 DECLARE_FUNCTION_PASS(LCSSATeardownPass);
+
+struct LoopInterchangeConfig {
+  u32 maxTransformsPerFunction = 4;  // 每函数最多成功交换次数
+  u32 maxCandidatesPerFunction = 64; // 每函数最多检查的相邻循环对
+  i64 minScoreDelta = 2;             // 交换前后局部性分数的最小增益
+};
+
+class LoopInterchangePass final : public FunctionPass {
+public:
+  explicit LoopInterchangePass(LoopInterchangeConfig config = {}) noexcept;
+  std::string_view name() const noexcept override;
+  PassResult run(Function *function, PassContext &context) override;
+
+private:
+  LoopInterchangeConfig config_;
+};
+
+struct UnrollAndJamConfig {
+  u32 maxTransformsPerFunction = 4;    // 单函数最多接受的候选数
+  u32 maxCandidatesPerFunction = 32;   // 单函数最多检查的外层循环数
+  u32 maxJamDepth = 6;                 // single-child chain最大融合深度
+  i32 maxFunctionInstructions = 20000; // 变换后函数指令硬上限
+  i32 minimumReuseScore = 1;           // 最少外层不变Load收益分
+  bool emitRemarks = false;            // 输出候选决策诊断
+};
+
+class UnrollAndJamPass final : public FunctionPass {
+public:
+  explicit UnrollAndJamPass(UnrollAndJamConfig config = {}) noexcept;
+  std::string_view name() const noexcept override;
+  PassResult run(Function *function, PassContext &context) override;
+
+private:
+  UnrollAndJamConfig config_;
+};
+
 // 对函数内所有自然循环构造Loop-Closed SSA 返回是否修改IR
 bool formLCSSA(Function *function, FunctionAnalysisManager &analyses);
 bool teardownLCSSA(Function *function);

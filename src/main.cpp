@@ -267,6 +267,8 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     hookLCSSAVerifier("indvars");
     hookLCSSAVerifier("loop-unswitch");
     hookLCSSAVerifier("invariant-repeat-reduction");
+    hookLCSSAVerifier("loop-interchange");
+    hookLCSSAVerifier("unroll-and-jam");
     hookLCSSAVerifier("loop-unroll");
     hookLCSSAVerifier("lsr");
 #endif
@@ -277,6 +279,11 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     passManager.addPass<DCEPass>();
     passManager.addPass<InvariantRepeatReductionPass>();
     passManager.addPass<DCEPass>();
+    passManager.addPass<LoopInterchangePass>();
+    passManager.addPass<DCEPass>();
+    UnrollAndJamConfig uajConfig;
+    uajConfig.emitRemarks = options.timePasses;
+    passManager.addPass<UnrollAndJamPass>(uajConfig);
     passManager.addPass<LoopUnrollPass>();
     passManager.addPass<LowerArrayIndexPass>();
     passManager.addPass<InstCombinePass>();
