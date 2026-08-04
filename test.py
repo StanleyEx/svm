@@ -264,16 +264,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--target-O",
         type=int,
+        nargs="+",
         choices=range(4),
         default=None,
-        help="GCC 对比优化级别 (RV -C 模式)不指定则对比 O0~O3 全级别",
+        metavar="N",
+        help="GCC 对比优化级别列表, 可多个 (如 --target-O 1 2 3); 不指定则对比 O0~O3 全级别",
     )
     p.add_argument(
-        "--avg-n",
+        "--runs",
         type=int,
         default=1,
         metavar="N",
-        help="性能测试取平均值的运行次数 (默认: 1)",
+        help="性能测试每个用例的重复运行次数 (默认: 1); 表格同时给出 N 次的最小值与平均值, 每次运行时间写入 *_raw.json",
     )
     p.add_argument("-i", "--input", help="指定 stdin 输入文件")
     p.add_argument("--timeout", type=float, default=10.0, help="编译超时时间(秒)")
@@ -608,10 +610,16 @@ def verify_and_measure_time(
     runs: int,
     timeout: float,
     is_valgrind: bool = False,
-) -> tuple[str, float | None]:
-    """执行命令 runs 次, 第一次验证正确性, 后续仅计时, 返回平均耗时"""
+) -> tuple[str, float | None, float | None, list[float]]:
+    """执行命令 runs 次, 第一次验证正确性, 后续仅计时
+
+    返回 (status, min_time, avg_time, raw_times):
+      - min_time: runs 次中的最小值 (与旧版行为一致)
+      - avg_time: runs 次中的算术平均值
+      - raw_times: 每一次的运行时间 (供方差/置信区间分析)
+    """
     if runs < 1:
-        return ("Invalid Runs", None)
+        return ("Invalid Runs", None, None, [])
     actual_timeout = timeout * (5 if is_valgrind else 1)
     times: list[float] = []
     try:
@@ -627,13 +635,13 @@ def verify_and_measure_time(
         times.append(time.perf_counter() - start)
         actual = f"{res.stdout.decode('utf-8', errors='replace').strip()}\n{res.returncode}".strip()
         if normalize(actual) != normalize(expected_out):
-            return ("Mismatch", None)
+            return ("Mismatch", None, None, times)
         if res.returncode < 0:
-            return (f"Crash ({res.returncode})", None)
+            return (f"Crash ({res.returncode})", None, None, times)
     except proc.TimeoutExpired:
-        return ("Timeout", None)
+        return ("Timeout", None, None, times)
     except OSError:
-        return ("Exec Err", None)
+        return ("Exec Err", None, None, times)
     for _ in range(runs - 1):
         try:
             start = time.perf_counter()
@@ -647,12 +655,13 @@ def verify_and_measure_time(
             )
             times.append(time.perf_counter() - start)
             if res.returncode < 0:
-                return (f"Crash ({res.returncode})", None)
+                return (f"Crash ({res.returncode})", None, None, times)
         except proc.TimeoutExpired:
-            return ("Timeout", None)
+            return ("Timeout", None, None, times)
         except OSError:
-            return ("Exec Err", None)
-    return ("OK", sum(times) / len(times))
+            return ("Exec Err", None, None, times)
+    avg = sum(times) / len(times) if times else None
+    return ("OK", min(times), avg, times)
 
 
 def _input_bytes(path: Path | None) -> bytes | None:
@@ -921,7 +930,7 @@ class LLIBackend(TestBackend):
                 )
                 if expected is None:
                     print("[WARNING] Could not get or generate expected output.")
-            runs = max(1, self.args.avg_n if self.args.compare else 1)
+            runs = max(1, self.args.runs or self.args.avg_n)
             timings: list[float] = []
 
             actual, elapsed = execute_llvm(
@@ -1225,14 +1234,25 @@ def _rv_worker(payload) -> CaseResult:
         return CaseResult(sy_path, f"Exception: {e}", None, ("Exception", str(e)))
 
 
+def sha256_hex(data: bytes | None) -> str:
+    """计算文件内容 sha256 (None/空 视为空内容, 保证 .in 缺失也可配对)"""
+    import hashlib
+
+    return hashlib.sha256(data or b"").hexdigest()
+
+
 def run_benchmark_worker(
     sy_path: Path,
     bench_timeout: float,
     target_opts: list[int],
-    avg_n: int,
+    runs: int,
     is_O0: bool = False,
-) -> str:
-    """对单个 .sy 文件进行 SVM vs GCC 多级优化性能对比"""
+) -> tuple[str, dict]:
+    """对单个 .sy 文件进行 SVM vs GCC 多级优化性能对比
+
+    返回 (输出文本, raw 数据字典)
+    raw 数据含稳定主键(相对路径 + source/input sha256) 与每次运行时间, 供统计/配对分析
+    """
     basename = sy_path.stem
     sy_dir = sy_path.parent
     in_file = sy_dir / f"{basename}.in"
@@ -1240,15 +1260,25 @@ def run_benchmark_worker(
     expected_out = get_or_generate_expected_output(sy_path, in_file, out_file)
     if expected_out is None:
         return (
-            f"[ERROR] {basename} : Cannot acquire standard output, skipping benchmark."
+            f"[ERROR] {basename} : Cannot acquire standard output, skipping benchmark.",
+            {},
         )
     stdin_data = in_file.read_bytes() if in_file.exists() else None
+    src_hash = sha256_hex(sy_path.read_bytes())
+    in_hash = sha256_hex(stdin_data)
+    rel_id = f"{sy_path.parent.name}/{basename}"
     output_lines = [
-        f"\n{'=' * 75}\n  Benchmark: {sy_path.parent.name}/{basename}\n{'=' * 75}"
+        f"\n{'=' * 75}\n  Benchmark: {rel_id}  [src={src_hash[:12]} in={in_hash[:12]}]\n{'=' * 75}"
     ]
+    raw_entry: dict = {
+        "id": rel_id,
+        "source_sha256": src_hash,
+        "input_sha256": in_hash,
+        "compilers": {},
+    }
     with tempfile.TemporaryDirectory(prefix=f"svm-test-{os.getpid()}-") as tmpdir:
         tmp = Path(tmpdir)
-        results: dict[str, tuple[str, float | None]] = {}
+        results: dict[str, tuple[str, float | None, float | None, list[float]]] = {}
         error_details: list[str] = []
         svm_asm = tmp / f"{basename}_svm.s"
         svm_exe = tmp / f"{basename}_svm"
@@ -1279,23 +1309,23 @@ def run_benchmark_worker(
                 stderr=proc.STDOUT,
                 timeout=TIMEOUT_LINK,
             )
-            status, t = verify_and_measure_time(
+            status, t_min, t_avg, t_raw = verify_and_measure_time(
                 [RISCV_QEMU, str(svm_exe)],
                 stdin_data,
                 expected_out,
-                avg_n,
+                runs,
                 bench_timeout,
             )
-            results["svm"] = (status, t)
+            results["svm"] = (status, t_min, t_avg, t_raw)
         except proc.TimeoutExpired:
-            results["svm"] = ("Compile Timeout", None)
+            results["svm"] = ("Compile Timeout", None, None, [])
         except proc.CalledProcessError as e:
-            results["svm"] = ("Compile Error", None)
+            results["svm"] = ("Compile Error", None, None, [])
             error_details.append(
                 f"[{basename}] svm/gcc 编译报错:\n{e.output.decode('utf-8', errors='replace').strip()}"
             )
         except OSError:
-            results["svm"] = ("Sys Exception", None)
+            results["svm"] = ("Sys Exception", None, None, [])
         for opt in target_opts:
             gcc_label = f"GCC-O{opt}"
             opt_exe = tmp / f"{basename}_{gcc_label}"
@@ -1303,52 +1333,64 @@ def run_benchmark_worker(
                 sy_path, opt_exe, target="riscv", opt_level=opt
             )
             if success:
-                status, t = verify_and_measure_time(
+                status, t_min, t_avg, t_raw = verify_and_measure_time(
                     [RISCV_QEMU, str(opt_exe)],
                     stdin_data,
                     expected_out,
-                    avg_n,
+                    runs,
                     bench_timeout,
                 )
-                results[gcc_label] = (status, t)
+                results[gcc_label] = (status, t_min, t_avg, t_raw)
             else:
-                results[gcc_label] = ("GCC Error", None)
+                results[gcc_label] = ("GCC Error", None, None, [])
                 error_details.append(f"[{basename}] {gcc_label} 编译失败:\n{err_msg}")
+        for label, (status, t_min, t_avg, t_raw) in results.items():
+            raw_entry["compilers"][label] = {
+                "status": status,
+                "times": t_raw,
+                "min": t_min,
+                "avg": t_avg,
+            }
         output_lines.append(
-            f"  {'Compiler':<12} {'Status':<18} {'Time (s)':>10} {'Ratio':>8} {'Rate':>8}"
+            f"  {'Compiler':<12} {'Status':<18} {'Min (s)':>10} {'Avg (s)':>10} {'Ratio':>8} {'Rate':>8}"
         )
-        output_lines.append(f"  {'-' * 10} {'-' * 18} {'-' * 10} {'-' * 8} {'-' * 8}")
-        _svm_status, svm_time = results.get("svm", ("Unknown", None))
+        output_lines.append(
+            f"  {'-' * 10} {'-' * 18} {'-' * 10} {'-' * 10} {'-' * 8} {'-' * 8}"
+        )
+        _svm_status, svm_time, _, _ = results.get("svm", ("Unknown", None, None, []))
         display_labels = ["svm"] + [f"GCC-O{opt}" for opt in target_opts]
         for label in display_labels:
             if label not in results:
                 continue
-            status, t = results[label]
-            if status != "OK" or t is None:
+            status, t_min, t_avg, _ = results[label]
+            if status != "OK" or t_min is None:
                 status_str = f"[{status}]"
                 output_lines.append(
-                    f"  {label:<12} {status_str:<18} {'-':>10} {'-':>8} {'-':>8}"
+                    f"  {label:<12} {status_str:<18} {'-':>10} {'-':>10} {'-':>8} {'-':>8}"
                 )
             elif svm_time and svm_time > 0 and (label != "svm"):
-                ratio = t / svm_time
+                ratio = t_min / svm_time
                 pct = ratio * 100
+                avg_s = f"{t_avg:.6f}s" if t_avg is not None else "-"
                 output_lines.append(
-                    f"  {label:<12} {'[OK] Valid':<18} {t:>10.6f}s {ratio:>8.3f} {pct:>7.1f}%"
+                    f"  {label:<12} {'[OK] Valid':<18} {t_min:>10.6f}s {avg_s:>10} {ratio:>8.3f} {pct:>7.1f}%"
                 )
             else:
+                avg_s = f"{t_avg:.6f}s" if t_avg is not None else "-"
                 output_lines.append(
-                    f"  {label:<12} {'[OK] Valid':<18} {t:>10.6f}s {'-':>8} {'-':>8}"
+                    f"  {label:<12} {'[OK] Valid':<18} {t_min:>10.6f}s {avg_s:>10} {'-':>8} {'-':>8}"
                 )
         if error_details:
             output_lines.append("\n[Error Details]")
             for err_text in error_details:
                 output_lines.append(truncate_output(err_text, 2048))
         output_lines.append(f"{'=' * 75}")
-    return "\n".join(output_lines)
+    return "\n".join(output_lines), raw_entry
 
 
-def _run_bench(args_tuple: tuple) -> tuple[str, Path]:
-    return run_benchmark_worker(*args_tuple), args_tuple[0]
+def _run_bench(args_tuple: tuple) -> tuple[str, Path, dict]:
+    res_str, raw = run_benchmark_worker(*args_tuple)
+    return res_str, args_tuple[0], raw
 
 
 def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
@@ -1356,13 +1398,12 @@ def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
     test_cases: list[tuple] = []
     bench_timeout = args.runtime_timeout or args.timeout
     is_O0 = getattr(args, "O0", False)
+    runs = max(1, args.runs or args.avg_n or 1)
     for root, _, files in os.walk(args.directory):
         for file in files:
             if file.endswith(".sy"):
                 sy_path = (Path(root) / file).resolve()
-                test_cases.append(
-                    (sy_path, bench_timeout, target_opts, args.avg_n, is_O0)
-                )
+                test_cases.append((sy_path, bench_timeout, target_opts, runs, is_O0))
     total = len(test_cases)
     if total == 0:
         print("No test cases found.")
@@ -1373,9 +1414,10 @@ def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
     print(
         f"Benchmarking {total} files ({workers} process(es))...\n"
         f"Targeting: GCC-[{opts_str}] "
-        f"(Averaging over {args.avg_n} runs)\n"
+        f"({runs} runs: min & avg; raw times in *_raw.json)\n"
     )
     output_log_dict: dict[Path | str, str] = {}
+    raw_entries: list[dict] = []
     if workers > 1:
         executor = ProcessPoolExecutor(max_workers=workers, initializer=_worker_init)
         _executor_ref[0] = executor
@@ -1386,9 +1428,11 @@ def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
                 if _shutdown_flag[0]:
                     break
                 try:
-                    res_str, source_path = future.result()
+                    res_str, source_path, raw = future.result()
                     completed_cases.add(source_path)
                     output_log_dict[source_path] = res_str
+                    if raw:
+                        raw_entries.append(raw)
                     print(res_str, flush=True)
                 except Exception as error:  # noqa: BLE001
                     err_msg = f"[ERROR] Benchmark task failed: {error}"
@@ -1407,8 +1451,10 @@ def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
                     tc for tc in test_cases if tc[0] not in completed_cases
                 ]
                 for tc in remaining_cases:
-                    res_str, source_path = _run_bench(tc)
+                    res_str, source_path, raw = _run_bench(tc)
                     output_log_dict[source_path] = res_str
+                    if raw:
+                        raw_entries.append(raw)
                     print(res_str, flush=True)
         finally:
             try:
@@ -1418,8 +1464,10 @@ def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
             _executor_ref[0] = None
     else:
         for tc in test_cases:
-            res_str, source_path = _run_bench(tc)
+            res_str, source_path, raw = _run_bench(tc)
             output_log_dict[source_path] = res_str
+            if raw:
+                raw_entries.append(raw)
             print(res_str, flush=True)
 
     if _shutdown_flag[0]:
@@ -1437,6 +1485,30 @@ def benchmark_all(args: argparse.Namespace, target_opts: list[int]) -> int:
     rank_dir.mkdir(exist_ok=True)
     with (rank_dir / "benchmark.txt").open("w", encoding="utf-8") as f:
         f.write("\n".join(final_log))
+
+    # 保存每次运行时间 (raw samples), 供方差/置信区间/配对检验
+    if raw_entries:
+        import datetime
+        import json
+
+        raw_name = Path(args.directory).resolve().name
+        raw_path = Path.cwd() / f"{raw_name}_raw.json"
+        raw_path.write_text(
+            json.dumps(
+                {
+                    "directory": str(Path(args.directory).resolve()),
+                    "runs": runs,
+                    "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "cases": raw_entries,
+                },
+                indent=1,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[INFO] Raw per-run times saved to {raw_path}", file=sys.stderr)
     return 130 if _shutdown_flag[0] else 0
 
 
@@ -1539,18 +1611,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.asm:
             return run_asm_rv(args.asm, args)
         if args.compare:
-            target_opts = [args.target_O] if args.target_O is not None else [0, 1, 2, 3]
+            target_opts = (
+                list(args.target_O) if args.target_O is not None else [0, 1, 2, 3]
+            )
             if args.directory:
                 return benchmark_all(args, target_opts)
             elif args.test:
-                print(
-                    run_benchmark_worker(
-                        Path(args.test).resolve(),
-                        args.runtime_timeout or args.timeout,
-                        target_opts,
-                        args.avg_n,
-                    )
+                res_str, _raw = run_benchmark_worker(
+                    Path(args.test).resolve(),
+                    args.runtime_timeout or args.timeout,
+                    target_opts,
+                    max(1, args.runs or args.avg_n or 1),
                 )
+                print(res_str)
                 return 0
             else:
                 print(
