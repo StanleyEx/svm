@@ -1,5 +1,6 @@
 #include "Alias.h"
 #include "Analysis.h"
+#include "IR.h"
 #include "Utils.h"
 
 #include <limits>
@@ -197,23 +198,23 @@ PointerInfo AliasInfo::computePointerInfo(Inst *pointer) const {
     return result;
   }
   case OP_ARRAYIDX: {
-    if (pointer->getOperandCount() == 0)
-      return {PointerKind::Opaque, pointer, std::nullopt, std::nullopt};
     PointerInfo result = info(pointer->getArg(0));
-    const ArrayPayload &array = pointer->getArray();
-    if (!result.constantOffset ||
-        array.nDims + 1 != pointer->getOperandCount() ||
-        (array.nDims != 0 && !array.strides)) {
+    if (!result.constantOffset) {
       result.constantOffset = std::nullopt;
       return result;
     }
 
     i64 offset = *result.constantOffset;
-    for (u32 index = 0; index < array.nDims; ++index) {
+    const u32 indexCount = pointer->getOperandCount() - 1;
+    for (u32 index = 0; index < indexCount; ++index) {
       Inst *subscript = pointer->getArg(index + 1);
+      u64 rawStride = 0;
       i64 scaled = 0;
       if (!subscript || subscript->getOp() != OP_ICONST ||
-          !checkedMul(subscript->getImm(), array.strides[index], scaled) ||
+          !arrayIndexStrideBytes(pointer, index, rawStride) ||
+          rawStride > static_cast<u64>(std::numeric_limits<i64>::max()) ||
+          !checkedMul(static_cast<i64>(subscript->getImm()),
+                      static_cast<i64>(rawStride), scaled) ||
           !checkedAdd(offset, scaled, offset)) {
         result.constantOffset = std::nullopt;
         return result;

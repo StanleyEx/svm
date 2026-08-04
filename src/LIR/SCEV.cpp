@@ -636,6 +636,20 @@ SCEVExpr *SCEV::createSCEV(Inst *value) const {
         base,
         getMulExpr(offset, getConstant(static_cast<i64>(stride), TY_I32)));
   }
+  case OP_ARRAYIDX: {
+    SCEVExpr *result = getSCEV(value->getArg(0));
+    const u32 indexCount = value->getOperandCount() - 1;
+    for (u32 index = 0; index < indexCount; ++index) {
+      u64 rawStride = 0;
+      if (!arrayIndexStrideBytes(value, index, rawStride) ||
+          rawStride > static_cast<u64>(std::numeric_limits<i64>::max()))
+        return getUnknown(value);
+      SCEVExpr *subscript = getSCEV(value->getArg(index + 1));
+      SCEVExpr *stride = getConstant(static_cast<i64>(rawStride), TY_I32);
+      result = getAddExpr(result, getMulExpr(subscript, stride));
+    }
+    return result;
+  }
   default:
     return getUnknown(value);
   }

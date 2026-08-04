@@ -23,26 +23,32 @@ Inst *foldGlobalLoad(Inst *load, IRBuilder &builder) {
     if (address->getOp() != OP_ARRAYIDX || address->getArg(0) != base)
       return std::nullopt;
     const ArrayPayload &array = address->getArray();
-    if (!global->isArray || array.nDims == 0 ||
+    if (!global->isArray || array.rank == 0 ||
         array.elementType != global->type ||
-        address->getOperandCount() != static_cast<u32>(array.nDims) + 1 ||
-        !array.dims || !array.strides)
+        address->getOperandCount() != static_cast<u32>(array.rank) + 2)
       return std::nullopt;
 
     const i32 rawElementSize = typeSizeBytes(global->type);
     if (rawElementSize <= 0)
       return std::nullopt;
     const u32 elementSize = static_cast<u32>(rawElementSize);
+    Inst *leading = address->getArg(1);
+    if (!leading || leading->isUndefValue() || leading->getOp() != OP_ICONST ||
+        leading->getImm() != 0)
+      return std::nullopt;
+
     u64 flatIndex = 0;
-    for (u32 dimension = 0; dimension < array.nDims; ++dimension) {
-      Inst *index = address->getArg(dimension + 1);
+    for (u32 dimension = 0; dimension < array.rank; ++dimension) {
+      Inst *index = address->getArg(dimension + 2);
+      u64 stride = 0;
       if (!index || index->isUndefValue() || index->getOp() != OP_ICONST ||
           index->getImm() < 0 || array.dims[dimension] == 0 ||
           static_cast<u32>(index->getImm()) >= array.dims[dimension] ||
-          array.strides[dimension] % elementSize != 0)
+          !arrayIndexStrideBytes(address, dimension + 1, stride) ||
+          stride % elementSize != 0)
         return std::nullopt;
       const u64 term = static_cast<u64>(static_cast<u32>(index->getImm())) *
-                       (array.strides[dimension] / elementSize);
+                       (stride / elementSize);
       if (term >= global->numElements ||
           flatIndex > static_cast<u64>(global->numElements - 1) - term)
         return std::nullopt;

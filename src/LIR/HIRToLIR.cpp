@@ -19,7 +19,6 @@ private:
   void materializeLocalInitializers(Function *function);
   void emitZeroInitializerLoop(Function *function, Inst *anchor, Inst *base,
                                i32 begin, i32 count, IRType type);
-  void lowerArrayIndices(Function *function);
   void flattenRegion(Region *region);
   void flattenBlock(BasicBlock *block);
   void expandIf(Inst *inst);
@@ -60,13 +59,11 @@ bool HIRToLIR::run(Function *function) {
 
   hoistAllocas(function);
   materializeLocalInitializers(function);
-  lowerArrayIndices(function);
   flattenRegion(function->region);
   function->phase = IRPhase::LIR;
   cleanupDeadBlocks(function);
   computePreds(function);
   computeUses(function);
-
   builder_ = nullptr;
   return true;
 }
@@ -169,36 +166,6 @@ void HIRToLIR::emitZeroInitializerLoop(Function *function, Inst *anchor,
   builder_->emitStore(ivAddress, builder_->iConst(begin), TY_I32);
   builder_->emitFor(builder_->iConst(begin + count), builder_->iConst(1),
                     ivAddress, body);
-}
-
-void HIRToLIR::lowerArrayIndices(Function *function) {
-  computeUses(function);
-  std::vector<Inst *> worklist;
-  forEachInstRecursive(function->region, [&](Inst *inst) {
-    if (inst->getOp() == OP_ARRAYIDX)
-      worklist.push_back(inst);
-  });
-  for (Inst *arrayIndex : worklist) {
-    if (!arrayIndex->parentBlock())
-      continue;
-    builder_->setInsertBefore(arrayIndex);
-    builder_->setCurrentSourceLocation(arrayIndex->sourceLocation);
-    Inst *offset = nullptr;
-    const ArrayPayload &array = arrayIndex->getArray();
-    for (u32 index = 0; index < array.nDims; ++index) {
-      assert(array.strides[index] <=
-             static_cast<u32>(std::numeric_limits<i32>::max()));
-      Inst *stride = builder_->iConst(static_cast<i32>(array.strides[index]));
-      Inst *term =
-          builder_->emit(OP_MUL, TY_I32, arrayIndex->getArg(index + 1), stride);
-      offset = offset ? builder_->emit(OP_ADD, TY_I32, offset, term) : term;
-    }
-    Inst *replacement = arrayIndex->getArg(0);
-    if (offset)
-      replacement = builder_->emitGetPtr(replacement, offset, 1);
-    replaceAllUsesWith(function, arrayIndex, replacement);
-    arrayIndex->eraseFromBlock();
-  }
 }
 
 void HIRToLIR::flattenRegion(Region *region) {

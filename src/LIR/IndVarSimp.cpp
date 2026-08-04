@@ -117,7 +117,7 @@ struct DerivedIVRewrite {
 bool isIVRewriteFriendlyUser(Inst *user) noexcept {
   if (!user)
     return false;
-  return user->getOp() == OP_GETPTR || isIntCompare(user->getOp());
+  return isAddressingOp(user->getOp()) || isIntCompare(user->getOp());
 }
 
 void collectDerivedIVRewrites(const SCEV &scev, Loop *loop,

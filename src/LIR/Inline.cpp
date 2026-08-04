@@ -102,7 +102,7 @@ bool isDiscardablePatternInst(const Inst *inst) noexcept {
     return false;
   return isArithmetic(inst->getOp()) || isCompare(inst->getOp()) ||
          isConversion(inst->getOp()) || inst->getOp() == OP_LNOT ||
-         inst->getOp() == OP_SELECT || inst->getOp() == OP_GETPTR;
+         inst->getOp() == OP_SELECT || isAddressingOp(inst->getOp());
 }
 
 bool matchCancelingFloatRecursion(Function *function,

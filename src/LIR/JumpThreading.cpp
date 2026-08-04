@@ -338,7 +338,7 @@ bool isCloneableTransition(BasicBlock *block, BasicBlock *header) noexcept {
        inst = inst->next()) {
     const OpCode op = inst->getOp();
     if (!isIntArithmetic(op) && !isIntCompare(op) && op != OP_ZEXT &&
-        op != OP_GETPTR)
+        !isAddressingOp(op))
       return false;
   }
   return true;

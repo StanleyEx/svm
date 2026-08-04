@@ -34,20 +34,20 @@ bool isCommutative(OpCode op) noexcept {
 }
 
 struct ValueKey {
-  OpCode op = OP_ICONST;         // 指令操作码
-  IRType type = TY_VOID;         // 结果类型
-  Function *callee = nullptr;    // 调用目标
-  i32 stride = 0;                // GETPTR字节步长
-  IRType elementType = TY_VOID;  // 数组或访存元素类型
-  u32 memorySize = 0;            // LOAD访问宽度
-  std::vector<Inst *> operands;  // 归约到leader的操作数
-  std::vector<u32> arrayStrides; // ARRAYIDX各维步长
+  OpCode op = OP_ICONST;        // 指令操作码
+  IRType type = TY_VOID;        // 结果类型
+  Function *callee = nullptr;   // 调用目标
+  i32 stride = 0;               // GETPTR字节步长
+  IRType elementType = TY_VOID; // 数组或访存元素类型
+  u32 memorySize = 0;           // LOAD访问宽度
+  std::vector<Inst *> operands; // 归约到leader的操作数
+  std::vector<u32> arrayDims;   // ARRAYIDX typed GEP物理形状
 
   bool operator==(const ValueKey &other) const noexcept {
     return op == other.op && type == other.type && callee == other.callee &&
            stride == other.stride && elementType == other.elementType &&
            memorySize == other.memorySize && operands == other.operands &&
-           arrayStrides == other.arrayStrides;
+           arrayDims == other.arrayDims;
   }
 };
 
@@ -65,8 +65,8 @@ struct ValueKeyHash {
     hash = mix(hash, std::hash<u32>{}(key.memorySize));
     for (Inst *operand : key.operands)
       hash = mix(hash, std::hash<Inst *>{}(operand));
-    for (u32 stride : key.arrayStrides)
-      hash = mix(hash, std::hash<u32>{}(stride));
+    for (u32 dim : key.arrayDims)
+      hash = mix(hash, std::hash<u32>{}(dim));
     return hash;
   }
 };
@@ -184,9 +184,9 @@ private:
     case OP_ARRAYIDX: {
       const ArrayPayload &array = inst->getArray();
       key.elementType = array.elementType;
-      if (array.nDims != 0) {
-        VERIFY(array.strides, "ARRAYIDX requires strides");
-        key.arrayStrides.assign(array.strides, array.strides + array.nDims);
+      if (array.rank != 0) {
+        VERIFY(array.dims, "ARRAYIDX requires a physical source shape");
+        key.arrayDims.assign(array.dims, array.dims + array.rank);
       }
       break;
     }

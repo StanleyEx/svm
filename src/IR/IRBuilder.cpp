@@ -526,24 +526,38 @@ Inst *IRBuilder::emitGetPtr(Inst *base, Inst *index, i32 stride) {
   return getPtr;
 }
 
-Inst *IRBuilder::emitArrayIndex(Inst *base, Inst *const *indices, u32 count,
-                                IRType elementType, const u32 *strides,
-                                const u32 *dims) {
-  assert(base && (count == 0 || (indices && strides && dims)));
-  assert(count < std::numeric_limits<u16>::max());
-  Inst *arrayIndex = newInst(OP_ARRAYIDX, TY_PTR, count + 1);
+Inst *IRBuilder::emitArrayIndex(Inst *base, Inst *const *indices,
+                                u32 indexCount, IRType elementType,
+                                const u32 *physicalDims, u32 rank) {
+  assert(base && base->getType() == TY_PTR && indices && indexCount != 0);
+  assert(indexCount < std::numeric_limits<u16>::max());
+  assert(rank <= std::numeric_limits<u16>::max());
+  assert(indexCount <= rank + 1 && typeSizeBytes(elementType) > 0);
+  assert(rank == 0 || physicalDims);
+  Inst *arrayIndex = newInst(OP_ARRAYIDX, TY_PTR, indexCount + 1);
   arrayIndex->setArg(0, base);
-  for (u32 index = 0; index < count; ++index)
+  for (u32 index = 0; index < indexCount; ++index) {
+    assert(indices[index] && indices[index]->getType() == TY_I32);
     arrayIndex->setArg(index + 1, indices[index]);
+  }
 
   ArrayPayload &payload = arrayIndex->getArray();
   payload.elementType = elementType;
-  payload.nDims = static_cast<u16>(count);
-  payload.strides = function_->arena->createArray<u32>(count);
-  payload.dims = function_->arena->createArray<u32>(count);
-  if (count) {
-    std::memcpy(payload.strides, strides, sizeof(u32) * count);
-    std::memcpy(payload.dims, dims, sizeof(u32) * count);
+  payload.rank = static_cast<u16>(rank);
+  if (rank != 0) {
+    payload.dims = function_->arena->createArray<u32>(rank);
+    for (u32 dimension = 0; dimension < rank; ++dimension)
+      assert(physicalDims[dimension] != 0);
+    std::memcpy(payload.dims, physicalDims, sizeof(u32) * rank);
+  }
+  for (u32 index = 0; index < indexCount; ++index) {
+    u64 stride = 0;
+    VERIFY(arrayIndexStrideBytes(arrayIndex, index, stride));
+    const bool constantZero = indices[index]->getOp() == OP_ICONST &&
+                              !indices[index]->isUndefValue() &&
+                              indices[index]->getImm() == 0;
+    VERIFY(constantZero ||
+           stride <= static_cast<u64>(std::numeric_limits<i32>::max()));
   }
   attach(arrayIndex);
   return arrayIndex;
@@ -720,14 +734,12 @@ Inst *IRBuilder::cloneInst(const Inst *source) {
     break;
   case OP_ARRAYIDX: {
     *clone->array_ = *source->array_;
-    const u32 count = source->array_->nDims;
-    clone->array_->strides = function_->arena->createArray<u32>(count);
-    clone->array_->dims = function_->arena->createArray<u32>(count);
-    if (count) {
-      std::memcpy(clone->array_->strides, source->array_->strides,
-                  sizeof(u32) * count);
+    const u32 rank = source->array_->rank;
+    clone->array_->dims = nullptr;
+    if (rank != 0) {
+      clone->array_->dims = function_->arena->createArray<u32>(rank);
       std::memcpy(clone->array_->dims, source->array_->dims,
-                  sizeof(u32) * count);
+                  sizeof(u32) * rank);
     }
     break;
   }

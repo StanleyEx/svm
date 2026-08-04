@@ -153,7 +153,12 @@ int run(const CompilerOptions &options, std::string_view sourceView,
       return;
     }
     passManager.addPass<HIRToLIRPass>();
-    if (options.stage == Stage::LirDumpPre || options.stage == Stage::LirDump) {
+    if (options.stage == Stage::LirDumpPre) {
+      passManager.addPass<PrintLLVMIR>(output);
+      return;
+    }
+    passManager.addPass<LowerArrayIndexPass>();
+    if (options.stage == Stage::LirDump) {
       passManager.addPass<PrintLLVMIR>(output);
       return;
     }
@@ -273,6 +278,7 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     passManager.addPass<InvariantRepeatReductionPass>();
     passManager.addPass<DCEPass>();
     passManager.addPass<LoopUnrollPass>();
+    passManager.addPass<LowerArrayIndexPass>();
     passManager.addPass<InstCombinePass>();
     passManager.addPass<SCCPPass>();
     passManager.addPass<ReassociatePass>();

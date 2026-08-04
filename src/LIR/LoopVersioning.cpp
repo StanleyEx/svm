@@ -124,7 +124,7 @@ i32 countInstructions(const std::vector<BasicBlock *> &blocks,
     for (Inst *phi = block->firstPhi(); phi; phi = phi->next())
       ++count;
     for (Inst *inst = block->firstInst(); inst; inst = inst->next())
-      ++count;
+      count += estimateArrayIndexLoweringCost(inst).instructions;
   }
 
   std::unordered_set<BasicBlock *> uniqueExits;

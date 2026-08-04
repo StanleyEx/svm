@@ -32,7 +32,10 @@ LoopUnrollMetrics computeMetrics(const CountedLoopShape &shape) {
     for (Inst *phi = block->firstPhi(); phi; phi = phi->next())
       ++result.bodyInstructions;
     for (Inst *inst = block->firstInst(); inst; inst = inst->next())
-      ++result.bodyInstructions;
+      result.bodyInstructions = static_cast<i32>(
+          std::min<i64>(std::numeric_limits<i32>::max(),
+                        static_cast<i64>(result.bodyInstructions) +
+                            estimateArrayIndexLoweringCost(inst).instructions));
     if (block != shape.header && block != shape.latch)
       result.compact = false;
     forEachSuccessor(block, [&](BasicBlock *successor) {

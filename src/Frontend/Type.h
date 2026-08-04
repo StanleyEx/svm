@@ -74,23 +74,31 @@ public:
   }
 };
 
+// HACK: Array Padding
+// 将源码维度映射为缓存冲突规避后的物理维度
+constexpr i32 paddedArrayDim(i32 dimension) noexcept {
+  constexpr i32 kPaddingModulo = 128;
+  constexpr i32 kPaddingElements = 16;
+  return dimension >= kPaddingModulo && dimension % kPaddingModulo == 0
+             ? dimension + kPaddingElements
+             : dimension;
+}
+
 class ArrayType final : public Type {
 public:
-  Type *elementType;       // 标量元素类型
-  const i32 *dims;         // 源码逻辑形状 最外层在前
-  const i32 *physicalDims; // 带缓存冲突 padding 的物理形状
-  u32 dimCount;            // 维度数量
+  Type *elementType; // 标量元素类型
+  const i32 *dims;   // 源码逻辑形状 最外层在前
+  u32 dimCount;      // 维度数量
 
-  ArrayType(Type *elementType, const i32 *dims, const i32 *physicalDims,
-            u32 dimCount) noexcept
+  ArrayType(Type *elementType, const i32 *dims, u32 dimCount) noexcept
       : Type(TypeKind::Array), elementType(elementType), dims(dims),
-        physicalDims(physicalDims), dimCount(dimCount) {}
+        dimCount(dimCount) {}
 
   // 返回包含物理 padding 的存储元素数
   u64 totalSize() const noexcept {
     u64 size = 1;
     for (u32 i = 0; i < dimCount; i++) {
-      size *= static_cast<u64>(physicalDims[i]);
+      size *= static_cast<u64>(paddedArrayDim(dims[i]));
     }
     return size;
   }
@@ -110,7 +118,7 @@ public:
       const u64 logicalDim = static_cast<u64>(dims[dimension]);
       offset += (logicalOffset % logicalDim) * stride;
       logicalOffset /= logicalDim;
-      stride *= static_cast<u64>(physicalDims[dimension]);
+      stride *= static_cast<u64>(paddedArrayDim(dims[dimension]));
     }
     assert(logicalOffset == 0);
     return offset;
@@ -199,31 +207,8 @@ public:
     i32 *storedDims = arena_.createArray<i32>(dimCount);
     std::memcpy(storedDims, dims, sizeof(i32) * dimCount);
 
-    // HACK: Array Padding
-    constexpr i32 kPaddingModulo = 128;
-    constexpr i32 kPaddingElements = 16;
-    bool needsPadding = false;
-    for (u32 i = 0; i < dimCount; ++i) {
-      if (storedDims[i] >= kPaddingModulo &&
-          storedDims[i] % kPaddingModulo == 0) {
-        needsPadding = true;
-        break;
-      }
-    }
-
-    i32 *physicalDims = storedDims;
-    if (needsPadding) {
-      physicalDims = arena_.createArray<i32>(dimCount);
-      for (u32 i = 0; i < dimCount; ++i) {
-        const i32 dim = storedDims[i];
-        physicalDims[i] = dim >= kPaddingModulo && dim % kPaddingModulo == 0
-                              ? dim + kPaddingElements
-                              : dim;
-      }
-    }
-
-    ArrayType *arrayType = arena_.create<ArrayType>(elementType, storedDims,
-                                                    physicalDims, dimCount);
+    ArrayType *arrayType =
+        arena_.create<ArrayType>(elementType, storedDims, dimCount);
     arrayMap_.insert({ArrayKey{elementType, storedDims, dimCount}, arrayType});
 
     return arrayType;

@@ -39,12 +39,20 @@ PressureSnapshot PressureOracle::buildSnapshot(Function *function) const {
     return result;
 
   std::unordered_map<Inst *, i32> indices;
+  i32 addressTemporaries = 0;
   for (BasicBlock *block = function->region->first; block;
        block = block->next()) {
     for (Inst *phi = block->firstPhi(); phi; phi = phi->next())
       indices.emplace(phi, result.liveInstructions++);
-    for (Inst *inst = block->firstInst(); inst; inst = inst->next())
-      indices.emplace(inst, result.liveInstructions++);
+    for (Inst *inst = block->firstInst(); inst; inst = inst->next()) {
+      indices.emplace(inst, result.liveInstructions);
+      const auto loweringCost = estimateArrayIndexLoweringCost(inst);
+      result.liveInstructions =
+          saturatingI32(static_cast<i64>(result.liveInstructions) +
+                        loweringCost.instructions);
+      addressTemporaries =
+          std::max(addressTemporaries, loweringCost.temporaries);
+    }
   }
 
   if (result.liveInstructions > config_.pressureScanCap) {
@@ -99,6 +107,8 @@ PressureSnapshot PressureOracle::buildSnapshot(Function *function) const {
     result.peakGPR = std::max(result.peakGPR, liveGPR);
     result.peakFPR = std::max(result.peakFPR, liveFPR);
   }
+  result.peakGPR =
+      saturatingI32(static_cast<i64>(result.peakGPR) + addressTemporaries);
   return result;
 }
 

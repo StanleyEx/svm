@@ -42,6 +42,60 @@ i32 typeSizeBytes(IRType type) noexcept {
   return 0;
 }
 
+bool arrayIndexStrideBytes(const Inst *instruction, u32 index,
+                           u64 &stride) noexcept {
+  stride = 0;
+  if (!instruction || instruction->getOp() != OP_ARRAYIDX ||
+      instruction->getOperandCount() < 2)
+    return false;
+
+  const ArrayPayload &array = instruction->getArray();
+  const u32 indexCount = instruction->getOperandCount() - 1;
+  const i32 elementSize = typeSizeBytes(array.elementType);
+  if (index >= indexCount || index > array.rank || elementSize <= 0 ||
+      (array.rank == 0 ? array.dims != nullptr : array.dims == nullptr))
+    return false;
+  for (u32 dimension = 0; dimension < array.rank; ++dimension)
+    if (array.dims[dimension] == 0)
+      return false;
+
+  u64 result = static_cast<u64>(elementSize);
+  const u32 firstDimension = index == 0 ? 0 : index;
+  for (u32 dimension = firstDimension; dimension < array.rank; ++dimension) {
+    u64 product = 0;
+    if (!checkedMul(result, static_cast<u64>(array.dims[dimension]), product))
+      return false;
+    result = product;
+  }
+  stride = result;
+  return true;
+}
+
+ArrayIndexLoweringCost
+estimateArrayIndexLoweringCost(const Inst *instruction) noexcept {
+  if (!instruction || instruction->getOp() != OP_ARRAYIDX)
+    return {1, 0};
+
+  i32 instructions = 0;
+  i32 parts = 0;
+  const u32 indexCount = instruction->getOperandCount() - 1;
+  for (u32 index = 0; index < indexCount; ++index) {
+    Inst *subscript = instruction->getArg(index + 1);
+    u64 stride = 0;
+    if (!subscript || !arrayIndexStrideBytes(instruction, index, stride))
+      return {1, 0};
+    const bool constant =
+        subscript->getOp() == OP_ICONST && !subscript->isUndefValue();
+    if (constant && subscript->getImm() == 0)
+      continue;
+    if (!constant && stride != 1)
+      ++instructions;
+    ++instructions;
+    ++parts;
+  }
+  return {instructions, parts > 1 ? 2 : parts};
+}
+
 const char *getString(OpCode op) noexcept {
   switch (op) {
 #define OP_NAME(value, text)                                                   \

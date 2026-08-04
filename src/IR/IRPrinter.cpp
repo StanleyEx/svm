@@ -426,16 +426,39 @@ private:
 
   void emitGetPtr(const Inst *inst, u32 depth) {
     std::string offset = valueName(inst->getArg(1));
+    const char *offsetType = "i32";
     if (inst->getStride() != 1) {
+      const std::string wideIndex = "%v" + std::to_string(nextValue_++);
+      for (u32 indent = 0; indent < depth; ++indent)
+        std::fputs("  ", out_);
+      std::fprintf(out_, "%s = sext i32 %s to i64\n", wideIndex.c_str(),
+                   valueName(inst->getArg(1)).c_str());
       offset = "%v" + std::to_string(nextValue_++);
       for (u32 indent = 0; indent < depth; ++indent)
         std::fputs("  ", out_);
-      std::fprintf(out_, "%s = mul i32 %s, %d\n", offset.c_str(),
-                   valueName(inst->getArg(1)).c_str(), inst->getStride());
+      std::fprintf(out_, "%s = mul i64 %s, %d\n", offset.c_str(),
+                   wideIndex.c_str(), inst->getStride());
+      offsetType = "i64";
     }
     emitPrefix(inst, depth);
-    std::fprintf(out_, "getelementptr i8, ptr %s, i32 %s",
-                 valueName(inst->getArg(0)).c_str(), offset.c_str());
+    std::fprintf(out_, "getelementptr i8, ptr %s, %s %s",
+                 valueName(inst->getArg(0)).c_str(), offsetType,
+                 offset.c_str());
+    emitLineEnd(inst);
+  }
+
+  void emitArrayIndex(const Inst *inst, u32 depth) {
+    const ArrayPayload &array = inst->getArray();
+    emitPrefix(inst, depth);
+    std::fputs("getelementptr ", out_);
+    for (u32 dimension = 0; dimension < array.rank; ++dimension)
+      std::fprintf(out_, "[%u x ", array.dims[dimension]);
+    std::fputs(typeName(array.elementType), out_);
+    for (u32 dimension = 0; dimension < array.rank; ++dimension)
+      std::fputc(']', out_);
+    std::fprintf(out_, ", ptr %s", valueName(inst->getArg(0)).c_str());
+    for (u32 index = 1; index < inst->getOperandCount(); ++index)
+      std::fprintf(out_, ", i32 %s", valueName(inst->getArg(index)).c_str());
     emitLineEnd(inst);
   }
 
@@ -482,6 +505,10 @@ private:
       emitGetPtr(inst, depth);
       return;
     }
+    if (inst->getOp() == OP_ARRAYIDX) {
+      emitArrayIndex(inst, depth);
+      return;
+    }
     emitPrefix(inst, depth);
     switch (inst->getOp()) {
     case OP_ALLOCA: {
@@ -507,12 +534,6 @@ private:
                    typeName(inst->getArg(1)->getType()),
                    valueName(inst->getArg(1)).c_str(),
                    valueName(inst->getArg(0)).c_str());
-      break;
-    case OP_ARRAYIDX:
-      std::fprintf(out_, "hir.arrayidx ptr %s",
-                   valueName(inst->getArg(0)).c_str());
-      for (u32 index = 1; index < inst->getOperandCount(); ++index)
-        std::fprintf(out_, ", i32 %s", valueName(inst->getArg(index)).c_str());
       break;
     case OP_LOCAL_INIT_VALUE:
       std::fprintf(out_, "hir.local_init.value ptr %s, i32 %s, %s %s",

@@ -106,19 +106,21 @@ enum OpCode : u16 {
   OP_STORE,  // (ptr, i32/f32) -> void [MemPayload]
   /// @brief 单级数组索引
   ///
-  /// byte GETPTR(base, idx) = base + index * stride
+  /// byte GETPTR(base, idx) = base + sext(idx) * stride
   /// arg0 = base : TY_PTR
   /// arg1 = idx : TY_I32
+  /// index先有符号扩展到pointer width, scale与add均在pointer width执行
+  /// 将该表达式解释为数学整数的优化必须另行证明pointer-width不回绕
   /// Payload字段: imm_ (stride in bytes)
   OP_GETPTR,
-  /// @brief 多级数组索引
+  /// @brief LLVM typed GEP数组索引
   ///
-  /// addr = base + idx_0 * stride[0] + ... + idx_{n-1} * stride[n-1]
   /// arg0 = base : TY_PTR
-  /// arg1...argn = idx_0..idx_{n-1} : TY_I32
+  /// arg1...argn = LLVM GEP indices : TY_I32
   /// -> TY_PTR
+  /// 每个index独立有符号扩展到pointer width, byte scale与prefix在该宽度累积
   /// Payload字段: array_ [ArrayPayload]
-  /// 在HIR到LIR阶段降级为多条MUL+ADD+GETPTR
+  /// 在重型循环优化窗口后由LowerArrayIndex降级为GETPTR链
   OP_ARRAYIDX,
   // 控制流
   /// @brief 函数调用
@@ -140,7 +142,7 @@ enum OpCode : u16 {
   /// arg2 = ivAddr : TY_PTR
   /// -> TY_VOID
   /// Payload字段: body_ [Region]
-  /// 常量负步长使用iv > stop，其余步长必须满足正向契约并使用iv < stop
+  /// 常量负步长使用iv > stop, 其余步长必须满足正向契约并使用iv < stop
   /// 在HIR到LIR阶段(expand_for)会被降级为标准的旋转后循环:
   /// [init_bb]:   初始化ivAddr
   /// [header_bb]: load iv, cmp direction(iv, stop), br cond loop_bb / exit_bb
@@ -625,9 +627,8 @@ struct MemPayload {
 
 struct ArrayPayload {
   IRType elementType = TY_I32;
-  u16 nDims = 0;
-  u32 *dims = nullptr;
-  u32 *strides = nullptr;
+  u16 rank = 0;        // 数组层数
+  u32 *dims = nullptr; // 各层物理维度 不含未知的形参首维
 };
 
 struct CallInfoPayload {
@@ -780,6 +781,17 @@ private:
 
   friend bool cleanupDeadBlocks(Function *function);
 };
+
+// ARRAYIDX typed GEP的字节步长
+bool arrayIndexStrideBytes(const Inst *instruction, u32 index,
+                           u64 &stride) noexcept;
+// ARRAYIDX降级到GETPTR的成本估算
+struct ArrayIndexLoweringCost {
+  i32 instructions = 0; // lowering后的指令数
+  i32 temporaries = 0;  // lowering期间同时存活的临时值近似
+};
+ArrayIndexLoweringCost
+estimateArrayIndexLoweringCost(const Inst *instruction) noexcept;
 
 class BasicBlock {
 public:
@@ -983,8 +995,8 @@ public:
   Inst *emitAlloca(u32 totalSizeBytes, IRType elementType);
   Inst *emitAllocaParam(u32 totalSizeBytes, IRType elementType, i16 paramIndex);
   Inst *emitGetPtr(Inst *base, Inst *index, i32 stride = 1);
-  Inst *emitArrayIndex(Inst *base, Inst *const *indices, u32 count,
-                       IRType elementType, const u32 *strides, const u32 *dims);
+  Inst *emitArrayIndex(Inst *base, Inst *const *indices, u32 indexCount,
+                       IRType elementType, const u32 *physicalDims, u32 rank);
   Inst *emitFor(Inst *stop, Inst *step, Inst *ivAddress, Region *body);
   Inst *emitCall(Function *callee, Inst *const *args, u32 count,
                  IRType returnType);
@@ -1044,7 +1056,7 @@ public:
     Inst *value = nullptr; // 边值
   };
   struct SplitBlockPredsResult {
-    BasicBlock *block = nullptr; // 新建汇合块，失败时为空
+    BasicBlock *block = nullptr; // 新建汇合块, 失败时为空
     bool createdPhi = false;     // 是否为不同边值创建了中间Phi
   };
   // 在普通指令后拆块并保留原后继Phi边值

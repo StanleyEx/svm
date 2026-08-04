@@ -73,6 +73,30 @@ bool remapArrayInitializer(const ArrayType *array, InitSegment *sourceSegments,
   return result.size() <= std::numeric_limits<u32>::max();
 }
 
+// ARRAYIDX降级使用i32字节步长 仅零下标可安全跳过超大步长
+bool arrayIndexStridesFitI32(Inst *const *indices, u32 indexCount,
+                             IRType elementType, const u32 *dimensions,
+                             u32 rank) noexcept {
+  for (u32 index = 0; index < indexCount; ++index) {
+    u64 stride = static_cast<u64>(typeSizeBytes(elementType));
+    const u32 firstDimension = index == 0 ? 0 : index;
+    for (u32 dimension = firstDimension; dimension < rank; ++dimension) {
+      u64 product = 0;
+      if (!checkedMul(stride, static_cast<u64>(dimensions[dimension]), product))
+        return false;
+      stride = product;
+    }
+    Inst *subscript = indices[index];
+    const bool constantZero = subscript->getOp() == OP_ICONST &&
+                              !subscript->isUndefValue() &&
+                              subscript->getImm() == 0;
+    if (!constantZero &&
+        stride > static_cast<u64>(std::numeric_limits<i32>::max()))
+      return false;
+  }
+  return true;
+}
+
 } // namespace
 
 ASTToHIR::ASTToHIR(Arena &arena, DiagnosticEngine &diagnostics) noexcept
@@ -872,55 +896,118 @@ Inst *ASTToHIR::lowerAddress(LValueExpr *expr) {
              "subscripted object has no scalar element type");
     return nullptr;
   }
-  const i32 *tailDims = nullptr;
-  const i32 *physicalTailDims = nullptr;
-  u32 tailCount = 0;
-  u32 firstDim = 0;
-  if (auto *array = dyn_cast<ArrayType>(declaredType)) {
-    firstDim = array->dimCount ? static_cast<u32>(array->dims[0]) : 0;
-    tailDims = array->dimCount > 1 ? array->dims + 1 : nullptr;
-    physicalTailDims = array->dimCount > 1 ? array->physicalDims + 1 : nullptr;
-    tailCount = array->dimCount > 1 ? array->dimCount - 1 : 0;
-  } else if (auto *pointer = dyn_cast<PointerType>(declaredType)) {
-    if (auto *array = dyn_cast<ArrayType>(pointer->pointee)) {
-      tailDims = array->dims;
-      physicalTailDims = array->physicalDims;
-      tailCount = array->dimCount;
+  const u32 count = expr->subscriptCount;
+  auto lowerSubscript = [&](u32 index) -> Inst * {
+    Inst *value = lowerExpr(expr->subscripts[index]);
+    return value ? builder_->castTo(value, TY_I32) : nullptr;
+  };
+
+  auto *directArray = dyn_cast<ArrayType>(declaredType);
+  auto *pointer = dyn_cast<PointerType>(declaredType);
+  auto *pointerArray =
+      pointer ? dyn_cast<ArrayType>(pointer->pointee) : nullptr;
+  ArrayType *sourceShape = directArray ? directArray : pointerArray;
+  if (sourceShape) {
+    if (directArray) {
+      if (count > sourceShape->dimCount) {
+        diagnose(expr->getLocation(), "too many subscripts for array shape");
+        return nullptr;
+      }
+      std::vector<Inst *> indices(count + 1);
+      indices[0] = builder_->iConst(0);
+      for (u32 index = 0; index < count; ++index) {
+        indices[index + 1] = lowerSubscript(index);
+        if (!indices[index + 1])
+          return nullptr;
+      }
+      std::vector<u32> physicalDims(sourceShape->dimCount);
+      for (u32 index = 0; index < sourceShape->dimCount; ++index)
+        physicalDims[index] =
+            static_cast<u32>(paddedArrayDim(sourceShape->dims[index]));
+      if (!arrayIndexStridesFitI32(
+              indices.data(), static_cast<u32>(indices.size()), elementType,
+              physicalDims.data(), sourceShape->dimCount)) {
+        diagnose(expr->getLocation(), "array index stride is too large");
+        return nullptr;
+      }
+      setSourceLocation(expr);
+      return builder_->emitArrayIndex(
+          base, indices.data(), static_cast<u32>(indices.size()), elementType,
+          physicalDims.data(), sourceShape->dimCount);
     }
+
+    // SysY数组形参省略首维 先用尾部物理聚合大小完成首层指针步进
+    if (count > sourceShape->dimCount + 1U) {
+      diagnose(expr->getLocation(), "too many subscripts for array shape");
+      return nullptr;
+    }
+    Inst *leadingIndex = lowerSubscript(0);
+    if (!leadingIndex)
+      return nullptr;
+    setSourceLocation(expr);
+    const bool zeroLeadingIndex = leadingIndex->getOp() == OP_ICONST &&
+                                  !leadingIndex->isUndefValue() &&
+                                  leadingIndex->getImm() == 0;
+    Inst *tailBase = base;
+    if (!zeroLeadingIndex) {
+      u64 tailElements = 1;
+      for (u32 dimension = 0; dimension < sourceShape->dimCount; ++dimension) {
+        u64 product = 0;
+        if (!checkedMul(
+                tailElements,
+                static_cast<u64>(paddedArrayDim(sourceShape->dims[dimension])),
+                product)) {
+          diagnose(expr->getLocation(), "array parameter shape is too large");
+          return nullptr;
+        }
+        tailElements = product;
+      }
+      u64 strideBytes = 0;
+      if (!checkedMul(tailElements,
+                      static_cast<u64>(typeSizeBytes(elementType)),
+                      strideBytes) ||
+          strideBytes == 0 ||
+          strideBytes > static_cast<u64>(std::numeric_limits<i32>::max())) {
+        diagnose(expr->getLocation(), "array parameter stride is too large");
+        return nullptr;
+      }
+      tailBase = builder_->emitGetPtr(base, leadingIndex,
+                                      static_cast<i32>(strideBytes));
+    }
+    if (count == 1)
+      return tailBase;
+
+    std::vector<Inst *> indices(count);
+    indices[0] = builder_->iConst(0);
+    for (u32 index = 1; index < count; ++index) {
+      indices[index] = lowerSubscript(index);
+      if (!indices[index])
+        return nullptr;
+    }
+    std::vector<u32> physicalDims(sourceShape->dimCount);
+    for (u32 index = 0; index < sourceShape->dimCount; ++index)
+      physicalDims[index] =
+          static_cast<u32>(paddedArrayDim(sourceShape->dims[index]));
+    if (!arrayIndexStridesFitI32(indices.data(),
+                                 static_cast<u32>(indices.size()), elementType,
+                                 physicalDims.data(), sourceShape->dimCount)) {
+      diagnose(expr->getLocation(), "array index stride is too large");
+      return nullptr;
+    }
+    return builder_->emitArrayIndex(tailBase, indices.data(), count,
+                                    elementType, physicalDims.data(),
+                                    sourceShape->dimCount);
   }
 
-  const u32 count = expr->subscriptCount;
-  const u32 logicalRank = tailCount + 1;
-  if (count > logicalRank) {
-    diagnose(expr->getLocation(), "too many subscripts for array shape");
+  if (!pointer || count != 1) {
+    diagnose(expr->getLocation(), "subscripted pointer has no array shape");
     return nullptr;
   }
-  std::vector<Inst *> indices(count);
-  std::vector<u32> strides(count);
-  std::vector<u32> dims(count);
-  u64 stride = static_cast<u32>(typeSizeBytes(elementType));
-  for (u32 dimension = 0; dimension < tailCount; ++dimension)
-    stride *= static_cast<u32>(physicalTailDims[dimension]);
-  for (u32 index = 0; index < count; ++index) {
-    if (stride > std::numeric_limits<u32>::max()) {
-      diagnose(expr->getLocation(), "array stride exceeds HIR limits");
-      return nullptr;
-    }
-    strides[index] = static_cast<u32>(stride);
-    dims[index] = index == 0 ? firstDim
-                             : (index - 1 < tailCount
-                                    ? static_cast<u32>(tailDims[index - 1])
-                                    : 0);
-    indices[index] = lowerExpr(expr->subscripts[index]);
-    if (!indices[index])
-      return nullptr;
-    indices[index] = builder_->castTo(indices[index], TY_I32);
-    if (index < tailCount)
-      stride /= static_cast<u32>(physicalTailDims[index]);
-  }
+  Inst *index = lowerSubscript(0);
+  if (!index)
+    return nullptr;
   setSourceLocation(expr);
-  return builder_->emitArrayIndex(base, indices.data(), count, elementType,
-                                  strides.data(), dims.data());
+  return builder_->emitGetPtr(base, index, typeSizeBytes(elementType));
 }
 
 Inst *ASTToHIR::materializeAddress(const ASTNode *declaration) {

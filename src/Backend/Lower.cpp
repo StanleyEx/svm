@@ -743,6 +743,9 @@ private:
       builder_.replaceInPlace(instruction, MOP_RET, TY_VOID);
       return;
     default:
+      assert(false &&
+             "LowerToRV64 does not support lowering this instruction" &&
+             instruction->getOp());
       failed_ = true;
       return;
     }
