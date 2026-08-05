@@ -294,6 +294,7 @@ int run(const CompilerOptions &options, std::string_view sourceView,
 
     // 标量清理可能改变入口或折掉封口Phi LSR前重新规范化
     passManager.addPass<LoopSimplifyPass>();
+    passManager.addPass<GCMPass>();
     passManager.addPass<LCSSAPass>();
     passManager.addPass<LSRPass>();
     passManager.addPass<LCSSATeardownPass>();

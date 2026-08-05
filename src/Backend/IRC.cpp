@@ -398,6 +398,8 @@ struct NodeInfo {
 
   // 每次 use 或 def 所在块频率的总和
   double useDefWeight = 0.0;
+  // 仅 use 所在块频率的总和 用于估算逐use重物化的动态成本
+  double useWeight = 0.0;
   // 第一次 use 或 def 的指令编号, 未出现时为 kNoInstruction
   u32 firstInstruction = kNoInstruction;
   // 最后一次 use 或 def 的指令编号, 用于估算线性跨度
@@ -463,6 +465,8 @@ private:
   void build();
   /// 记录一次 use 或 def 出现, 累计块频率权重并更新首末编号和 hotness
   void noteOccurrence(u32 node, double frequency, u32 instruction);
+  /// 记录一次 use 并额外累计逐use重物化成本权重
+  void noteUseOccurrence(u32 node, double frequency, u32 instruction);
 
   // === 主迭代 ===
   // 按 degree 与 move-related 分流 Initial 节点到三个队列
@@ -959,6 +963,15 @@ void IRCAllocator::noteOccurrence(u32 node, double frequency, u32 instruction) {
                              : std::max(info.lastInstruction, instruction);
 }
 
+void IRCAllocator::noteUseOccurrence(u32 node, double frequency,
+                                     u32 instruction) {
+  if (node >= virtualCount_)
+    return;
+  NodeInfo &info = nodes_[node];
+  info.useWeight += frequency;
+  noteOccurrence(node, frequency, instruction);
+}
+
 /// 从本轮空状态构建干涉图, move 表, 节点统计和 spill 评分
 void IRCAllocator::build() {
   // 循环深度和支配关系是本轮启发式与跨类 rewrite 的只读 CFG 事实
@@ -1191,7 +1204,7 @@ void IRCAllocator::build() {
           fatal(function_, diagnosticLocation(inst), "IRC遇到越界使用: %u.",
                 static_cast<unsigned>(value->id));
         setBit(live.data(), value->id);
-        noteOccurrence(value->id, frequency, instruction);
+        noteUseOccurrence(value->id, frequency, instruction);
         // 当前 Build 遍历首次遇到的有效位置获胜, 多个冲突位置不累计投票
         if (abiRegister < NUM_PREGS &&
             nodes_[value->id].abiPreference >= NUM_PREGS)
@@ -1452,6 +1465,7 @@ void IRCAllocator::combine(u32 root, u32 merged) {
     if (destination.abiPreference >= NUM_PREGS)
       destination.abiPreference = source.abiPreference;
     destination.useDefWeight += source.useDefWeight;
+    destination.useWeight += source.useWeight;
     destination.hotness = std::max(destination.hotness, source.hotness);
     destination.spillDepth =
         std::max(destination.spillDepth, source.spillDepth);
@@ -1551,14 +1565,16 @@ bool IRCAllocator::tryFreeze() {
 /// 从 Spill 队列选择最低评分节点, 放弃其 move 后送入 Simplify;
 /// 下一次主循环才会把它压栈, AssignColors 仍可能在邻居着色后为它找到颜色
 bool IRCAllocator::trySelectSpill() {
-  // 先选 spill cost 低者; 精确平局依次偏好可重物化, 较深 spillDepth, 较大
-  // footprint, 较冷节点和较小编号; 扫描同时压实懒惰队列中的过期条目
+  // 先选 spill cost 低者
+  // 平局依次偏好廉价LI重物化-较深 spillDepth-较大 footprint-较冷节点-较小编号
+  // 扫描同时压实懒惰队列中的过期条目
   const auto key = [&](u32 node) {
     const NodeInfo &info = nodes_[node];
+    const i32 cheapRemat =
+        info.rematerializable && info.remat.kind == RematKind::Li ? 1 : 0;
     return std::make_tuple(
-        info.spillCost, -static_cast<i32>(info.rematerializable),
-        -static_cast<i32>(info.spillDepth), -static_cast<i64>(info.footprint()),
-        info.hotness, node);
+        info.spillCost, -cheapRemat, -static_cast<i32>(info.spillDepth),
+        -static_cast<i64>(info.footprint()), info.hotness, node);
   };
 
   // infinity 仍是可比较评分, 若所有候选均为 infinity 仍会按其余键选择一个;
@@ -1596,9 +1612,22 @@ double IRCAllocator::spillCost(const NodeInfo &info) const {
   // 热位置访问越多越应保留, 高度数或长跨度节点被移走时通常释放更多图压力
   const double degree = static_cast<double>(std::max(u32{1}, info.degree));
   double cost = info.useDefWeight / (degree * static_cast<double>(footprint));
-  // LI 和 LA 可在 use 点重建, 不需要 frame slot, store 或 reload
-  if (info.rematerializable)
-    cost *= 0.01;
+  if (info.rematerializable) {
+    if (info.remat.kind == RematKind::Li) {
+      // LI 通常是一条廉价纯指令 继续优先逐use重建
+      cost *= 0.01;
+    } else if (info.remat.kind == RematKind::La) {
+      // LA 通常展开为带重定位的 AUIPC+ADDI, 冷路径仍可重物化
+      // 循环深度和同一热点迭代内的多次use会逐步提高保留价值,避免每个访存前重发LA
+      const double hotLevel = std::log10(std::max(1.0, info.hotness));
+      const double usesAtHottestLevel =
+          info.useWeight / std::max(1.0, info.hotness);
+      const double costScale = std::clamp(
+          0.25 + 1.00 * hotLevel + 0.10 * std::min(4.0, usesAtHottestLevel),
+          0.25, 8.0);
+      cost *= costScale;
+    }
+  }
   // 主要喂给常量 store 的值被视为较廉价受害者
   if (info.storeConstant)
     cost *= 0.20;
