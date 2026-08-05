@@ -9,7 +9,7 @@
 namespace svm::ir {
 namespace {
 
-constexpr i32 kMaxHoistedPerPreheader = 8;
+constexpr i32 kMaxHoistedPerEntry = 8;
 constexpr i32 kMaxScalarLoopInstructions = 192;
 
 bool isLargeIntegerLI(const Inst *inst) noexcept {
@@ -60,18 +60,33 @@ bool allUsesInside(const Inst *definition, const Loop *loop) noexcept {
   return true;
 }
 
+BasicBlock *uniqueLoopEntry(const Loop *loop) noexcept {
+  if (!loop || !loop->header())
+    return nullptr;
+  BasicBlock *entry = nullptr;
+  for (u32 index = 0; index < loop->header()->getPredecessorCount(); ++index) {
+    BasicBlock *predecessor = loop->header()->getPredecessor(index);
+    if (loop->contains(predecessor))
+      continue;
+    if (entry)
+      return nullptr;
+    entry = predecessor;
+  }
+  return entry;
+}
+
 Loop *chooseTargetLoop(Inst *definition, const LoopInfo &loopInfo,
                        std::unordered_map<Loop *, bool> &cache) {
   if (!definition || !definition->parentBlock())
     return nullptr;
   Loop *inner = loopInfo.getLoopFor(definition->parentBlock());
-  if (!inner || !inner->getPreheader() || !allUsesInside(definition, inner) ||
+  if (!inner || !uniqueLoopEntry(inner) || !allUsesInside(definition, inner) ||
       !loopAllowsHoist(inner, cache))
     return nullptr;
 
   Loop *target = inner;
   for (Loop *outer = inner->parent(); outer; outer = outer->parent()) {
-    if (!outer->getPreheader() || !allUsesInside(definition, outer) ||
+    if (!uniqueLoopEntry(outer) || !allUsesInside(definition, outer) ||
         !loopAllowsHoist(outer, cache))
       break;
     target = outer;
@@ -79,8 +94,8 @@ Loop *chooseTargetLoop(Inst *definition, const LoopInfo &loopInfo,
   return target;
 }
 
-Inst *findLeader(BasicBlock *preheader, i64 value, IRType type) noexcept {
-  for (Inst *inst = preheader ? preheader->firstInst() : nullptr; inst;
+Inst *findLeader(BasicBlock *entry, i64 value, IRType type) noexcept {
+  for (Inst *inst = entry ? entry->firstInst() : nullptr; inst;
        inst = inst->next()) {
     if (inst->getOp() == MOP_LI && inst->getType() == type &&
         inst->getImm64() == value)
@@ -104,14 +119,13 @@ bool runConstantHoist(Function *function, const LoopInfo &loopInfo) {
         continue;
       }
       Loop *target = chooseTargetLoop(inst, loopInfo, allowedLoops);
-      BasicBlock *preheader = target ? target->getPreheader() : nullptr;
-      if (!preheader || !preheader->endsWithTerminator()) {
+      BasicBlock *entry = uniqueLoopEntry(target);
+      if (!entry || !entry->endsWithTerminator()) {
         inst = next;
         continue;
       }
 
-      if (Inst *leader =
-              findLeader(preheader, inst->getImm64(), inst->getType())) {
+      if (Inst *leader = findLeader(entry, inst->getImm64(), inst->getType())) {
         if (builder.replace(inst, leader)) {
           changed = true;
           if (!queryFactBundle(function, leader).valid) {
@@ -125,11 +139,10 @@ bool runConstantHoist(Function *function, const LoopInfo &loopInfo) {
         inst = next;
         continue;
       }
-      i32 &count = hoistedCounts[preheader];
-      if (count < kMaxHoistedPerPreheader) {
-        // 当前IR的跨块move接口刻意拒绝以terminator为锚点
-        // 重建等价LI可保持块尾终结符不动 也让Use链和vreg元数据通过统一入口迁移
-        builder.setInsertBefore(preheader->terminator());
+      i32 &count = hoistedCounts[entry];
+      if (count < kMaxHoistedPerEntry) {
+        // LI可安全投机到共享入口 不要要求LoopInfo的dedicated preheader
+        builder.setInsertBefore(entry->terminator());
         builder.setCurrentSourceLocation(inst->sourceLocation);
         Inst *hoisted = builder.emit(MOP_LI, inst->getType());
         hoisted->setImm64(inst->getImm64());
