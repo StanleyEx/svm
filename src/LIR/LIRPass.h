@@ -14,6 +14,7 @@ DECLARE_MODULE_PASS(DeadArgumentEliminationPass);
 DECLARE_MODULE_PASS(DeadFunctionEliminationPass);
 DECLARE_MODULE_PASS(GlobalVariableLocalizationPass);
 DECLARE_MODULE_PASS(DSEPass);
+DECLARE_MODULE_PASS(MemoizationPass);
 DECLARE_FUNCTION_PASS(Mem2RegPass);
 DECLARE_FUNCTION_PASS(ShortCircuitCanonicalizePass);
 DECLARE_FUNCTION_PASS(SwitchCanonicalizePass);

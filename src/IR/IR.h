@@ -554,6 +554,7 @@ struct Global {
   enum class GlobalOrigin : u8 {
     SourceGlobal, // 源码定义的全局变量
     StringLiteral,
+    Unknown, // 编译器生成
   };
   Global *prev = nullptr, *next = nullptr;
   const char *name = nullptr;

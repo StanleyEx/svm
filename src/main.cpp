@@ -244,6 +244,8 @@ int run(const CompilerOptions &options, std::string_view sourceView,
     passManager.addPass<SimplifyCFGPass>();
     passManager.addPass<DCEPass>();
 
+    passManager.addPass<MemoizationPass>();
+
 #ifndef NDEBUG
     const auto hookLCSSAVerifier = [&passManager](std::string_view passName) {
       passManager.options().hook(
