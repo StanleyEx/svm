@@ -233,7 +233,7 @@ int run(const CompilerOptions &options, std::string_view sourceView,
       passManager.addPass<DCEPass>();
     }
 
-    // DSE只证明内存写不可观察 随后交给标量与控制流清理收割地址生产链
+    // DSE只证明内存写不可观察 随后交给标量与控制流清理优化地址生产链
     passManager.addPass<DSEPass>();
     passManager.addPass<DCEPass>();
     passManager.addPass<SimplifyCFGPass>();
